@@ -2,123 +2,131 @@ package telemetry_test
 
 import (
 	"context"
+	"io/ioutil"
 	"log"
-	"strings"
 	"testing"
 
 	"golang.org/x/tools/internal/telemetry/event"
 	"golang.org/x/tools/internal/telemetry/export"
-	"golang.org/x/tools/internal/telemetry/stats"
-	"golang.org/x/tools/internal/telemetry/unit"
 )
 
 type Hooks struct {
-	A func(ctx context.Context, a *int) (context.Context, func())
-	B func(ctx context.Context, b *string) (context.Context, func())
+	A func(ctx context.Context, a int) (context.Context, func())
+	B func(ctx context.Context, b string) (context.Context, func())
 }
 
 var (
-	aValue  = event.NewInt64Key("a", "")
+	aValue  = event.NewIntKey("a", "")
 	bValue  = event.NewStringKey("b", "")
-	aCount  = stats.Int64("aCount", "Count of time A is called.", unit.Dimensionless)
-	aStat   = stats.Int64("aValue", "A value.", unit.Dimensionless)
-	bCount  = stats.Int64("B", "Count of time B is called.", unit.Dimensionless)
-	bLength = stats.Int64("BLen", "B length.", unit.Dimensionless)
+	aCount  = event.NewInt64Key("aCount", "Count of time A is called.")
+	aStat   = event.NewIntKey("aValue", "A value.")
+	bCount  = event.NewInt64Key("B", "Count of time B is called.")
+	bLength = event.NewIntKey("BLen", "B length.")
 
 	Baseline = Hooks{
-		A: func(ctx context.Context, a *int) (context.Context, func()) {
+		A: func(ctx context.Context, a int) (context.Context, func()) {
 			return ctx, func() {}
 		},
-		B: func(ctx context.Context, b *string) (context.Context, func()) {
+		B: func(ctx context.Context, b string) (context.Context, func()) {
 			return ctx, func() {}
 		},
 	}
 
 	StdLog = Hooks{
-		A: func(ctx context.Context, a *int) (context.Context, func()) {
-			log.Printf("start A where a=%d", *a)
-			return ctx, func() {
-				log.Printf("end A where a=%d", *a)
-			}
+		A: func(ctx context.Context, a int) (context.Context, func()) {
+			log.Printf("A where a=%d", a)
+			return ctx, func() {}
 		},
-		B: func(ctx context.Context, b *string) (context.Context, func()) {
-			log.Printf("start B where b=%q", *b)
-			return ctx, func() {
-				log.Printf("end B where b=%q", *b)
-			}
+		B: func(ctx context.Context, b string) (context.Context, func()) {
+			log.Printf("B where b=%q", b)
+			return ctx, func() {}
 		},
 	}
 
 	Log = Hooks{
-		A: func(ctx context.Context, a *int) (context.Context, func()) {
-			event.Print(ctx, "start A", aValue.Of(int64(*a)))
-			return ctx, func() {
-				event.Print(ctx, "end A", aValue.Of(int64(*a)))
-			}
+		A: func(ctx context.Context, a int) (context.Context, func()) {
+			event.Print1(ctx, "A", aValue.Of(a))
+			return ctx, func() {}
 		},
-		B: func(ctx context.Context, b *string) (context.Context, func()) {
-			event.Print(ctx, "start B", bValue.Of(*b))
-			return ctx, func() {
-				event.Print(ctx, "end B", bValue.Of(*b))
-			}
+		B: func(ctx context.Context, b string) (context.Context, func()) {
+			event.Print1(ctx, "B", bValue.Of(b))
+			return ctx, func() {}
 		},
 	}
 
 	Trace = Hooks{
-		A: func(ctx context.Context, a *int) (context.Context, func()) {
-			return event.StartSpan(ctx, "A")
+		A: func(ctx context.Context, a int) (context.Context, func()) {
+			return event.StartSpan1(ctx, "A", aValue.Of(a))
 		},
-		B: func(ctx context.Context, b *string) (context.Context, func()) {
-			return event.StartSpan(ctx, "B")
+		B: func(ctx context.Context, b string) (context.Context, func()) {
+			return event.StartSpan1(ctx, "B", bValue.Of(b))
 		},
 	}
 
 	Stats = Hooks{
-		A: func(ctx context.Context, a *int) (context.Context, func()) {
-			aCount.Record(ctx, 1)
-			return ctx, func() {
-				aStat.Record(ctx, int64(*a))
-			}
+		A: func(ctx context.Context, a int) (context.Context, func()) {
+			event.Record1(ctx, aStat.Of(a))
+			event.Record1(ctx, aCount.Of(1))
+			return ctx, func() {}
 		},
-		B: func(ctx context.Context, b *string) (context.Context, func()) {
-			bCount.Record(ctx, 1)
-			return ctx, func() {
-				bLength.Record(ctx, int64(len(*b)))
-			}
+		B: func(ctx context.Context, b string) (context.Context, func()) {
+			event.Record1(ctx, bLength.Of(len(b)))
+			event.Record1(ctx, bCount.Of(1))
+			return ctx, func() {}
 		},
 	}
+
+	initialList = []int{0, 1, 22, 333, 4444, 55555, 666666, 7777777}
+	stringList  = []string{
+		"A value",
+		"Some other value",
+		"A nice longer value but not too long",
+		"V",
+		"",
+		"ı",
+		"prime count of values",
+	}
 )
+
+type namedBenchmark struct {
+	name string
+	test func(*testing.B)
+}
 
 func Benchmark(b *testing.B) {
 	b.Run("Baseline", Baseline.runBenchmark)
 	b.Run("StdLog", StdLog.runBenchmark)
-	event.SetExporter(nil)
-	b.Run("LogNoExporter", Log.runBenchmark)
-	b.Run("TraceNoExporter", Trace.runBenchmark)
-	b.Run("StatsNoExporter", Stats.runBenchmark)
+	benchmarks := []namedBenchmark{
+		{"Log", Log.runBenchmark},
+		{"Trace", Trace.runBenchmark},
+		{"Stats", Stats.runBenchmark},
+	}
 
-	event.SetExporter(newExporter())
-	b.Run("Log", Log.runBenchmark)
-	b.Run("Trace", Trace.runBenchmark)
-	b.Run("Stats", Stats.runBenchmark)
+	event.SetExporter(nil)
+	for _, t := range benchmarks {
+		b.Run(t.name+"NoExporter", t.test)
+	}
+
+	event.SetExporter(noopExporter)
+	for _, t := range benchmarks {
+		b.Run(t.name+"Noop", t.test)
+	}
+
+	event.SetExporter(export.Spans(export.LogWriter(ioutil.Discard, false)))
+	for _, t := range benchmarks {
+		b.Run(t.name, t.test)
+	}
 }
 
 func A(ctx context.Context, hooks Hooks, a int) int {
-	ctx, done := hooks.A(ctx, &a)
+	ctx, done := hooks.A(ctx, a)
 	defer done()
-	if a > 0 {
-		a = a * 10
-	}
-	return B(ctx, hooks, a, "Called from A")
+	return B(ctx, hooks, a, stringList[a%len(stringList)])
 }
 
 func B(ctx context.Context, hooks Hooks, a int, b string) int {
-	_, done := hooks.B(ctx, &b)
+	_, done := hooks.B(ctx, b)
 	defer done()
-	b = strings.ToUpper(b)
-	if len(b) > 1024 {
-		b = strings.ToLower(b)
-	}
 	return a + len(b)
 }
 
@@ -128,37 +136,16 @@ func (hooks Hooks) runBenchmark(b *testing.B) {
 	b.ResetTimer()
 	var acc int
 	for i := 0; i < b.N; i++ {
-		for _, value := range []int{0, 10, 20, 100, 1000} {
+		for _, value := range initialList {
 			acc += A(ctx, hooks, value)
 		}
 	}
 }
 
 func init() {
-	log.SetOutput(new(noopWriter))
+	log.SetOutput(ioutil.Discard)
 }
 
-type noopWriter int
-
-func (nw *noopWriter) Write(b []byte) (int, error) {
-	return len(b), nil
-}
-
-type loggingExporter struct {
-	logger event.Exporter
-}
-
-func newExporter() *loggingExporter {
-	return &loggingExporter{
-		logger: export.LogWriter(new(noopWriter), false),
-	}
-}
-
-func (e *loggingExporter) ProcessEvent(ctx context.Context, ev event.Event) (context.Context, event.Event) {
-	ctx, ev = export.ContextSpan(ctx, ev)
-	return e.logger.ProcessEvent(ctx, ev)
-}
-
-func (e *loggingExporter) Metric(ctx context.Context, data event.MetricData) {
-	e.logger.Metric(ctx, data)
+func noopExporter(ctx context.Context, ev event.Event, tagMap event.TagMap) context.Context {
+	return ctx
 }

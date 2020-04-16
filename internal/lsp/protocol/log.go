@@ -14,37 +14,48 @@ import (
 
 type loggingStream struct {
 	stream jsonrpc2.Stream
+	logMu  sync.Mutex
 	log    io.Writer
 }
 
 // LoggingStream returns a stream that does LSP protocol logging too
 func LoggingStream(str jsonrpc2.Stream, w io.Writer) jsonrpc2.Stream {
-	return &loggingStream{str, w}
+	return &loggingStream{stream: str, log: w}
 }
 
 func (s *loggingStream) Read(ctx context.Context) ([]byte, int64, error) {
 	data, count, err := s.stream.Read(ctx)
 	if err == nil {
+		s.logMu.Lock()
+		defer s.logMu.Unlock()
 		logIn(s.log, data)
 	}
 	return data, count, err
 }
 
 func (s *loggingStream) Write(ctx context.Context, data []byte) (int64, error) {
+	s.logMu.Lock()
+	defer s.logMu.Unlock()
 	logOut(s.log, data)
 	count, err := s.stream.Write(ctx, data)
 	return count, err
 }
 
-// Combined has all the fields of both Request and Response.
+// wireCombined has all the fields of both Request and Response.
 // We can decode this and then work out which it is.
-type Combined struct {
-	VersionTag jsonrpc2.VersionTag `json:"jsonrpc"`
-	ID         *jsonrpc2.ID        `json:"id,omitempty"`
-	Method     string              `json:"method"`
-	Params     *json.RawMessage    `json:"params,omitempty"`
-	Result     *json.RawMessage    `json:"result,omitempty"`
-	Error      *jsonrpc2.Error     `json:"error,omitempty"`
+type wireCombined struct {
+	VersionTag interface{}      `json:"jsonrpc"`
+	ID         *jsonrpc2.ID     `json:"id,omitempty"`
+	Method     string           `json:"method"`
+	Params     *json.RawMessage `json:"params,omitempty"`
+	Result     *json.RawMessage `json:"result,omitempty"`
+	Error      *wireError       `json:"error,omitempty"`
+}
+
+type wireError struct {
+	Code    int64            `json:"code"`
+	Message string           `json:"message"`
+	Data    *json.RawMessage `json:"data"`
 }
 
 type req struct {
@@ -101,22 +112,11 @@ func (m *mapped) setServer(id string, r req) {
 
 const eor = "\r\n\r\n\r\n"
 
-func strID(x *jsonrpc2.ID) string {
-	if x == nil {
-		// should never happen, but we need a number
-		return "999999999"
-	}
-	if x.Name != "" {
-		return x.Name
-	}
-	return fmt.Sprintf("%d", x.Number)
-}
-
-func logCommon(outfd io.Writer, data []byte) (*Combined, time.Time, string) {
+func logCommon(outfd io.Writer, data []byte) (*wireCombined, time.Time, string) {
 	if outfd == nil {
 		return nil, time.Time{}, ""
 	}
-	var v Combined
+	var v wireCombined
 	err := json.Unmarshal(data, &v)
 	if err != nil {
 		fmt.Fprintf(outfd, "Unmarshal %v\n", err)
@@ -136,13 +136,12 @@ func logOut(outfd io.Writer, data []byte) {
 	if v == nil {
 		return
 	}
+	id := fmt.Sprint(v.ID)
 	if v.Error != nil {
-		id := strID(v.ID)
-		fmt.Fprintf(outfd, "[Error - %s] Received #%s %s%s", tmfmt, id, v.Error, eor)
+		fmt.Fprintf(outfd, "[Error - %s] Received #%s %s%s", tmfmt, id, v.Error.Message, eor)
 		return
 	}
 	buf := strings.Builder{}
-	id := strID(v.ID)
 	fmt.Fprintf(&buf, "[Trace - %s] ", tmfmt) // common beginning
 	if v.ID != nil && v.Method != "" && v.Params != nil {
 		fmt.Fprintf(&buf, "Received request '%s - (%s)'.\n", v.Method, id)
@@ -178,7 +177,7 @@ func logOut(outfd io.Writer, data []byte) {
 		if v.Result != nil {
 			r = string(*v.Result)
 		}
-		fmt.Fprintf(&buf, "%s\n%s\n%s%s", p, r, v.Error, eor)
+		fmt.Fprintf(&buf, "%s\n%s\n%s%s", p, r, v.Error.Message, eor)
 	}
 	outfd.Write([]byte(buf.String()))
 }
@@ -189,16 +188,15 @@ func logIn(outfd io.Writer, data []byte) {
 	if v == nil {
 		return
 	}
+	id := fmt.Sprint(v.ID)
 	// ID Method Params => Sending request
 	// ID !Method Result(might be null, but !Params) => Sending response (could we get an Error?)
 	// !ID Method Params => Sending notification
 	if v.Error != nil { // does this ever happen?
-		id := strID(v.ID)
-		fmt.Fprintf(outfd, "[Error - %s] Sent #%s %s%s", tmfmt, id, v.Error, eor)
+		fmt.Fprintf(outfd, "[Error - %s] Sent #%s %s%s", tmfmt, id, v.Error.Message, eor)
 		return
 	}
 	buf := strings.Builder{}
-	id := strID(v.ID)
 	fmt.Fprintf(&buf, "[Trace - %s] ", tmfmt) // common beginning
 	if v.ID != nil && v.Method != "" && (v.Params != nil || v.Method == "shutdown") {
 		fmt.Fprintf(&buf, "Sending request '%s - (%s)'.\n", v.Method, id)
@@ -238,7 +236,7 @@ func logIn(outfd io.Writer, data []byte) {
 		if v.Result != nil {
 			r = string(*v.Result)
 		}
-		fmt.Fprintf(&buf, "%s\n%s\n%s%s", p, r, v.Error, eor)
+		fmt.Fprintf(&buf, "%s\n%s\n%s%s", p, r, v.Error.Message, eor)
 	}
 	outfd.Write([]byte(buf.String()))
 }

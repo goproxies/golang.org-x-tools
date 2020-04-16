@@ -66,18 +66,18 @@ func DiffSymbols(t *testing.T, uri span.URI, want, got []protocol.DocumentSymbol
 	sort.Slice(want, func(i, j int) bool { return want[i].Name < want[j].Name })
 	sort.Slice(got, func(i, j int) bool { return got[i].Name < got[j].Name })
 	if len(got) != len(want) {
-		return summarizeSymbols(t, -1, want, got, "different lengths got %v want %v", len(got), len(want))
+		return summarizeSymbols(-1, want, got, "different lengths got %v want %v", len(got), len(want))
 	}
 	for i, w := range want {
 		g := got[i]
 		if w.Name != g.Name {
-			return summarizeSymbols(t, i, want, got, "incorrect name got %v want %v", g.Name, w.Name)
+			return summarizeSymbols(i, want, got, "incorrect name got %v want %v", g.Name, w.Name)
 		}
 		if w.Kind != g.Kind {
-			return summarizeSymbols(t, i, want, got, "incorrect kind got %v want %v", g.Kind, w.Kind)
+			return summarizeSymbols(i, want, got, "incorrect kind got %v want %v", g.Kind, w.Kind)
 		}
 		if protocol.CompareRange(w.SelectionRange, g.SelectionRange) != 0 {
-			return summarizeSymbols(t, i, want, got, "incorrect span got %v want %v", g.SelectionRange, w.SelectionRange)
+			return summarizeSymbols(i, want, got, "incorrect span got %v want %v", g.SelectionRange, w.SelectionRange)
 		}
 		if msg := DiffSymbols(t, uri, w.Children, g.Children); msg != "" {
 			return fmt.Sprintf("children of %s: %s", w.Name, msg)
@@ -86,7 +86,7 @@ func DiffSymbols(t *testing.T, uri span.URI, want, got []protocol.DocumentSymbol
 	return ""
 }
 
-func summarizeSymbols(t *testing.T, i int, want, got []protocol.DocumentSymbol, reason string, args ...interface{}) string {
+func summarizeSymbols(i int, want, got []protocol.DocumentSymbol, reason string, args ...interface{}) string {
 	msg := &bytes.Buffer{}
 	fmt.Fprint(msg, "document symbols failed")
 	if i >= 0 {
@@ -163,7 +163,7 @@ func summarizeWorkspaceSymbols(i int, want, got []protocol.SymbolInformation, re
 
 // DiffDiagnostics prints the diff between expected and actual diagnostics test
 // results.
-func DiffDiagnostics(uri span.URI, want, got []source.Diagnostic) string {
+func DiffDiagnostics(uri span.URI, want, got []*source.Diagnostic) string {
 	source.SortDiagnostics(want)
 	source.SortDiagnostics(got)
 
@@ -197,7 +197,7 @@ func DiffDiagnostics(uri span.URI, want, got []source.Diagnostic) string {
 	return ""
 }
 
-func summarizeDiagnostics(i int, uri span.URI, want, got []source.Diagnostic, reason string, args ...interface{}) string {
+func summarizeDiagnostics(i int, uri span.URI, want, got []*source.Diagnostic, reason string, args ...interface{}) string {
 	msg := &bytes.Buffer{}
 	fmt.Fprint(msg, "diagnostics failed")
 	if i >= 0 {
@@ -495,4 +495,27 @@ func summarizeCompletionItems(i int, want, got []protocol.CompletionItem, reason
 		fmt.Fprintf(msg, "  %v\n", d)
 	}
 	return msg.String()
+}
+
+func FormatFolderName(folder string) string {
+	if index := strings.Index(folder, "testdata"); index != -1 {
+		return folder[index:]
+	}
+	return folder
+}
+
+func EnableAllAnalyzers(snapshot source.Snapshot, opts *source.Options) {
+	if opts.UserEnabledAnalyses == nil {
+		opts.UserEnabledAnalyses = make(map[string]bool)
+	}
+	for _, a := range opts.DefaultAnalyzers {
+		if !a.Enabled(snapshot) {
+			opts.UserEnabledAnalyses[a.Analyzer.Name] = true
+		}
+	}
+	for _, a := range opts.TypeErrorAnalyzers {
+		if !a.Enabled(snapshot) {
+			opts.UserEnabledAnalyses[a.Analyzer.Name] = true
+		}
+	}
 }

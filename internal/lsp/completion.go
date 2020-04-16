@@ -28,9 +28,8 @@ func (s *Server) completion(ctx context.Context, params *protocol.CompletionPara
 	case source.Mod:
 		candidates, surrounding = nil, nil
 	}
-
 	if err != nil {
-		event.Print(ctx, "no completions found", tag.Position.Of(params.Position), event.Err.Of(err))
+		event.Error(ctx, "no completions found", err, tag.Position.Of(params.Position))
 	}
 	if candidates == nil {
 		return &protocol.CompletionList{
@@ -118,15 +117,6 @@ func toProtocolCompletionItems(candidates []source.CompletionItem, rng protocol.
 
 			Preselect:     i == 0,
 			Documentation: candidate.Documentation,
-		}
-		// Trigger signature help for any function or method completion.
-		// This is helpful even if a function does not have parameters,
-		// since we show return types as well.
-		switch item.Kind {
-		case protocol.FunctionCompletion, protocol.MethodCompletion:
-			item.Command = &protocol.Command{
-				Command: "editor.action.triggerParameterHints",
-			}
 		}
 		items = append(items, item)
 	}

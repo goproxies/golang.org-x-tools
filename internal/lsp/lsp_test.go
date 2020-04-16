@@ -38,7 +38,7 @@ func TestLSP(t *testing.T) {
 type runner struct {
 	server      *Server
 	data        *tests.Data
-	diagnostics map[span.URI][]source.Diagnostic
+	diagnostics map[span.URI][]*source.Diagnostic
 	ctx         context.Context
 }
 
@@ -54,10 +54,16 @@ func testLSP(t *testing.T, exporter packagestest.Exporter) {
 		options := tests.DefaultOptions()
 		session.SetOptions(options)
 		options.Env = datum.Config.Env
-		v, _, err := session.NewView(ctx, datum.Config.Dir, span.URIFromPath(datum.Config.Dir), options)
+		v, snapshot, err := session.NewView(ctx, datum.Config.Dir, span.URIFromPath(datum.Config.Dir), options)
 		if err != nil {
 			t.Fatal(err)
 		}
+
+		// Enable type error analyses for tests.
+		// TODO(golang/go#38212): Delete this once they are enabled by default.
+		tests.EnableAllAnalyzers(snapshot, &options)
+		v.SetOptions(ctx, options)
+
 		// Check to see if the -modfile flag is available, this is basically a check
 		// to see if the go version >= 1.14. Otherwise, the modfile specific tests
 		// will always fail if this flag is not available.
@@ -89,7 +95,7 @@ func testLSP(t *testing.T, exporter packagestest.Exporter) {
 			data:   datum,
 			ctx:    ctx,
 		}
-		t.Run(datum.Folder, func(t *testing.T) {
+		t.Run(tests.FormatFolderName(datum.Folder), func(t *testing.T) {
 			t.Helper()
 			tests.Run(t, r, datum)
 		})
@@ -113,10 +119,10 @@ func (r *runner) CodeLens(t *testing.T, uri span.URI, want []protocol.CodeLens) 
 	}
 }
 
-func (r *runner) Diagnostics(t *testing.T, uri span.URI, want []source.Diagnostic) {
+func (r *runner) Diagnostics(t *testing.T, uri span.URI, want []*source.Diagnostic) {
 	// Get the diagnostics for this view if we have not done it before.
 	if r.diagnostics == nil {
-		r.diagnostics = make(map[span.URI][]source.Diagnostic)
+		r.diagnostics = make(map[span.URI][]*source.Diagnostic)
 		v := r.server.session.View(r.data.Config.Dir)
 		// Always run diagnostics with analysis.
 		reports := r.server.diagnose(r.ctx, v.Snapshot(), true)
@@ -377,7 +383,7 @@ func (r *runner) SuggestedFix(t *testing.T, spn span.Span, actionKinds []string)
 	}
 	// Get the diagnostics for this view if we have not done it before.
 	if r.diagnostics == nil {
-		r.diagnostics = make(map[span.URI][]source.Diagnostic)
+		r.diagnostics = make(map[span.URI][]*source.Diagnostic)
 		// Always run diagnostics with analysis.
 		reports := r.server.diagnose(r.ctx, view.Snapshot(), true)
 		for key, diags := range reports {
@@ -390,7 +396,7 @@ func (r *runner) SuggestedFix(t *testing.T, spn span.Span, actionKinds []string)
 		// some diagnostics have a range with the same start and end position (8:1-8:1).
 		// The current marker functionality prevents us from having a range of 0 length.
 		if protocol.ComparePosition(d.Range.Start, rng.Start) == 0 {
-			diag = &d
+			diag = d
 			break
 		}
 	}
@@ -407,7 +413,7 @@ func (r *runner) SuggestedFix(t *testing.T, spn span.Span, actionKinds []string)
 		},
 		Context: protocol.CodeActionContext{
 			Only:        codeActionKinds,
-			Diagnostics: toProtocolDiagnostics([]source.Diagnostic{*diag}),
+			Diagnostics: toProtocolDiagnostics([]*source.Diagnostic{diag}),
 		},
 	})
 	if err != nil {

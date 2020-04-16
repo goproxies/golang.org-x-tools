@@ -3,16 +3,16 @@ package protocol
 // Package protocol contains data types and code for LSP jsonrpcs
 // generated automatically from vscode-languageserver-node
 // commit: 151b520c995ee3d76729b5c46258ab273d989726
-// last fetched Fri Mar 13 2020 17:02:20 GMT-0400 (Eastern Daylight Time)
+// last fetched Mon Mar 30 2020 21:01:17 GMT-0400 (Eastern Daylight Time)
 
 // Code generated (see typescript/README.md) DO NOT EDIT.
 
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 
 	"golang.org/x/tools/internal/jsonrpc2"
-	"golang.org/x/tools/internal/telemetry/event"
 	"golang.org/x/tools/internal/xcontext"
 )
 
@@ -31,145 +31,100 @@ type Client interface {
 	ApplyEdit(context.Context, *ApplyWorkspaceEditParams) (*ApplyWorkspaceEditResponse, error)
 }
 
-func (h clientHandler) Deliver(ctx context.Context, r *jsonrpc2.Request, delivered bool) bool {
-	if delivered {
-		return false
-	}
-	if ctx.Err() != nil {
-		ctx := xcontext.Detach(ctx)
-		r.Reply(ctx, nil, jsonrpc2.NewErrorf(RequestCancelledError, ""))
-		return true
-	}
-	switch r.Method {
-	case "window/showMessage": // notif
-		var params ShowMessageParams
-		if err := json.Unmarshal(*r.Params, &params); err != nil {
-			sendParseError(ctx, r, err)
-			return true
+func ClientHandler(client Client, handler jsonrpc2.Handler) jsonrpc2.Handler {
+	return func(ctx context.Context, reply jsonrpc2.Replier, r *jsonrpc2.Request) error {
+		if ctx.Err() != nil {
+			ctx := xcontext.Detach(ctx)
+			return reply(ctx, nil, RequestCancelledError)
 		}
-		if err := h.client.ShowMessage(ctx, &params); err != nil {
-			event.Error(ctx, "", err)
-		}
-		return true
-	case "window/logMessage": // notif
-		var params LogMessageParams
-		if err := json.Unmarshal(*r.Params, &params); err != nil {
-			sendParseError(ctx, r, err)
-			return true
-		}
-		if err := h.client.LogMessage(ctx, &params); err != nil {
-			event.Error(ctx, "", err)
-		}
-		return true
-	case "telemetry/event": // notif
-		var params interface{}
-		if err := json.Unmarshal(*r.Params, &params); err != nil {
-			sendParseError(ctx, r, err)
-			return true
-		}
-		if err := h.client.Event(ctx, &params); err != nil {
-			event.Error(ctx, "", err)
-		}
-		return true
-	case "textDocument/publishDiagnostics": // notif
-		var params PublishDiagnosticsParams
-		if err := json.Unmarshal(*r.Params, &params); err != nil {
-			sendParseError(ctx, r, err)
-			return true
-		}
-		if err := h.client.PublishDiagnostics(ctx, &params); err != nil {
-			event.Error(ctx, "", err)
-		}
-		return true
-	case "$/progress": // notif
-		var params ProgressParams
-		if err := json.Unmarshal(*r.Params, &params); err != nil {
-			sendParseError(ctx, r, err)
-			return true
-		}
-		if err := h.client.Progress(ctx, &params); err != nil {
-			event.Error(ctx, "", err)
-		}
-		return true
-	case "workspace/workspaceFolders": // req
-		if r.Params != nil {
-			r.Reply(ctx, nil, jsonrpc2.NewErrorf(jsonrpc2.CodeInvalidParams, "Expected no params"))
-			return true
-		}
-		resp, err := h.client.WorkspaceFolders(ctx)
-		if err := r.Reply(ctx, resp, err); err != nil {
-			event.Error(ctx, "", err)
-		}
-		return true
-	case "workspace/configuration": // req
-		var params ParamConfiguration
-		if err := json.Unmarshal(*r.Params, &params); err != nil {
-			sendParseError(ctx, r, err)
-			return true
-		}
-		resp, err := h.client.Configuration(ctx, &params)
-		if err := r.Reply(ctx, resp, err); err != nil {
-			event.Error(ctx, "", err)
-		}
-		return true
-	case "window/workDoneProgress/create": // req
-		var params WorkDoneProgressCreateParams
-		if err := json.Unmarshal(*r.Params, &params); err != nil {
-			sendParseError(ctx, r, err)
-			return true
-		}
-		err := h.client.WorkDoneProgressCreate(ctx, &params)
-		if err := r.Reply(ctx, nil, err); err != nil {
-			event.Error(ctx, "", err)
-		}
-		return true
-	case "client/registerCapability": // req
-		var params RegistrationParams
-		if err := json.Unmarshal(*r.Params, &params); err != nil {
-			sendParseError(ctx, r, err)
-			return true
-		}
-		err := h.client.RegisterCapability(ctx, &params)
-		if err := r.Reply(ctx, nil, err); err != nil {
-			event.Error(ctx, "", err)
-		}
-		return true
-	case "client/unregisterCapability": // req
-		var params UnregistrationParams
-		if err := json.Unmarshal(*r.Params, &params); err != nil {
-			sendParseError(ctx, r, err)
-			return true
-		}
-		err := h.client.UnregisterCapability(ctx, &params)
-		if err := r.Reply(ctx, nil, err); err != nil {
-			event.Error(ctx, "", err)
-		}
-		return true
-	case "window/showMessageRequest": // req
-		var params ShowMessageRequestParams
-		if err := json.Unmarshal(*r.Params, &params); err != nil {
-			sendParseError(ctx, r, err)
-			return true
-		}
-		resp, err := h.client.ShowMessageRequest(ctx, &params)
-		if err := r.Reply(ctx, resp, err); err != nil {
-			event.Error(ctx, "", err)
-		}
-		return true
-	case "workspace/applyEdit": // req
-		var params ApplyWorkspaceEditParams
-		if err := json.Unmarshal(*r.Params, &params); err != nil {
-			sendParseError(ctx, r, err)
-			return true
-		}
-		resp, err := h.client.ApplyEdit(ctx, &params)
-		if err := r.Reply(ctx, resp, err); err != nil {
-			event.Error(ctx, "", err)
-		}
-		return true
-	default:
-		return false
+		switch r.Method {
+		case "window/showMessage": // notif
+			var params ShowMessageParams
+			if err := json.Unmarshal(*r.Params, &params); err != nil {
+				return sendParseError(ctx, reply, r, err)
+			}
+			err := client.ShowMessage(ctx, &params)
+			return reply(ctx, nil, err)
+		case "window/logMessage": // notif
+			var params LogMessageParams
+			if err := json.Unmarshal(*r.Params, &params); err != nil {
+				return sendParseError(ctx, reply, r, err)
+			}
+			err := client.LogMessage(ctx, &params)
+			return reply(ctx, nil, err)
+		case "telemetry/event": // notif
+			var params interface{}
+			if err := json.Unmarshal(*r.Params, &params); err != nil {
+				return sendParseError(ctx, reply, r, err)
+			}
+			err := client.Event(ctx, &params)
+			return reply(ctx, nil, err)
+		case "textDocument/publishDiagnostics": // notif
+			var params PublishDiagnosticsParams
+			if err := json.Unmarshal(*r.Params, &params); err != nil {
+				return sendParseError(ctx, reply, r, err)
+			}
+			err := client.PublishDiagnostics(ctx, &params)
+			return reply(ctx, nil, err)
+		case "$/progress": // notif
+			var params ProgressParams
+			if err := json.Unmarshal(*r.Params, &params); err != nil {
+				return sendParseError(ctx, reply, r, err)
+			}
+			err := client.Progress(ctx, &params)
+			return reply(ctx, nil, err)
+		case "workspace/workspaceFolders": // req
+			if r.Params != nil {
+				return reply(ctx, nil, fmt.Errorf("%w: expected no params", jsonrpc2.ErrInvalidParams))
+			}
+			resp, err := client.WorkspaceFolders(ctx)
+			return reply(ctx, resp, err)
+		case "workspace/configuration": // req
+			var params ParamConfiguration
+			if err := json.Unmarshal(*r.Params, &params); err != nil {
+				return sendParseError(ctx, reply, r, err)
+			}
+			resp, err := client.Configuration(ctx, &params)
+			return reply(ctx, resp, err)
+		case "window/workDoneProgress/create": // req
+			var params WorkDoneProgressCreateParams
+			if err := json.Unmarshal(*r.Params, &params); err != nil {
+				return sendParseError(ctx, reply, r, err)
+			}
+			err := client.WorkDoneProgressCreate(ctx, &params)
+			return reply(ctx, nil, err)
+		case "client/registerCapability": // req
+			var params RegistrationParams
+			if err := json.Unmarshal(*r.Params, &params); err != nil {
+				return sendParseError(ctx, reply, r, err)
+			}
+			err := client.RegisterCapability(ctx, &params)
+			return reply(ctx, nil, err)
+		case "client/unregisterCapability": // req
+			var params UnregistrationParams
+			if err := json.Unmarshal(*r.Params, &params); err != nil {
+				return sendParseError(ctx, reply, r, err)
+			}
+			err := client.UnregisterCapability(ctx, &params)
+			return reply(ctx, nil, err)
+		case "window/showMessageRequest": // req
+			var params ShowMessageRequestParams
+			if err := json.Unmarshal(*r.Params, &params); err != nil {
+				return sendParseError(ctx, reply, r, err)
+			}
+			resp, err := client.ShowMessageRequest(ctx, &params)
+			return reply(ctx, resp, err)
+		case "workspace/applyEdit": // req
+			var params ApplyWorkspaceEditParams
+			if err := json.Unmarshal(*r.Params, &params); err != nil {
+				return sendParseError(ctx, reply, r, err)
+			}
+			resp, err := client.ApplyEdit(ctx, &params)
+			return reply(ctx, resp, err)
+		default:
+			return handler(ctx, reply, r)
 
+		}
 	}
 }
 
@@ -198,7 +153,7 @@ func (s *clientDispatcher) Progress(ctx context.Context, params *ProgressParams)
 }
 func (s *clientDispatcher) WorkspaceFolders(ctx context.Context) ([]WorkspaceFolder /*WorkspaceFolder[] | null*/, error) {
 	var result []WorkspaceFolder /*WorkspaceFolder[] | null*/
-	if err := s.Conn.Call(ctx, "workspace/workspaceFolders", nil, &result); err != nil {
+	if err := Call(ctx, s.Conn, "workspace/workspaceFolders", nil, &result); err != nil {
 		return nil, err
 	}
 	return result, nil
@@ -206,27 +161,27 @@ func (s *clientDispatcher) WorkspaceFolders(ctx context.Context) ([]WorkspaceFol
 
 func (s *clientDispatcher) Configuration(ctx context.Context, params *ParamConfiguration) ([]interface{}, error) {
 	var result []interface{}
-	if err := s.Conn.Call(ctx, "workspace/configuration", params, &result); err != nil {
+	if err := Call(ctx, s.Conn, "workspace/configuration", params, &result); err != nil {
 		return nil, err
 	}
 	return result, nil
 }
 
 func (s *clientDispatcher) WorkDoneProgressCreate(ctx context.Context, params *WorkDoneProgressCreateParams) error {
-	return s.Conn.Call(ctx, "window/workDoneProgress/create", params, nil) // Call, not Notify
+	return Call(ctx, s.Conn, "window/workDoneProgress/create", params, nil) // Call, not Notify
 }
 
 func (s *clientDispatcher) RegisterCapability(ctx context.Context, params *RegistrationParams) error {
-	return s.Conn.Call(ctx, "client/registerCapability", params, nil) // Call, not Notify
+	return Call(ctx, s.Conn, "client/registerCapability", params, nil) // Call, not Notify
 }
 
 func (s *clientDispatcher) UnregisterCapability(ctx context.Context, params *UnregistrationParams) error {
-	return s.Conn.Call(ctx, "client/unregisterCapability", params, nil) // Call, not Notify
+	return Call(ctx, s.Conn, "client/unregisterCapability", params, nil) // Call, not Notify
 }
 
 func (s *clientDispatcher) ShowMessageRequest(ctx context.Context, params *ShowMessageRequestParams) (*MessageActionItem /*MessageActionItem | null*/, error) {
 	var result *MessageActionItem /*MessageActionItem | null*/
-	if err := s.Conn.Call(ctx, "window/showMessageRequest", params, &result); err != nil {
+	if err := Call(ctx, s.Conn, "window/showMessageRequest", params, &result); err != nil {
 		return nil, err
 	}
 	return result, nil
@@ -234,7 +189,7 @@ func (s *clientDispatcher) ShowMessageRequest(ctx context.Context, params *ShowM
 
 func (s *clientDispatcher) ApplyEdit(ctx context.Context, params *ApplyWorkspaceEditParams) (*ApplyWorkspaceEditResponse, error) {
 	var result *ApplyWorkspaceEditResponse
-	if err := s.Conn.Call(ctx, "workspace/applyEdit", params, &result); err != nil {
+	if err := Call(ctx, s.Conn, "workspace/applyEdit", params, &result); err != nil {
 		return nil, err
 	}
 	return result, nil

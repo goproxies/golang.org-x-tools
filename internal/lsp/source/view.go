@@ -10,6 +10,7 @@ import (
 	"go/ast"
 	"go/token"
 	"go/types"
+	"io"
 
 	"golang.org/x/mod/modfile"
 	"golang.org/x/tools/go/analysis"
@@ -41,11 +42,7 @@ type Snapshot interface {
 	IsSaved(uri span.URI) bool
 
 	// Analyze runs the analyses for the given package at this snapshot.
-	Analyze(ctx context.Context, id string, analyzers []*analysis.Analyzer) ([]*Error, error)
-
-	// FindAnalysisError returns the analysis error represented by the diagnostic.
-	// This is used to get the SuggestedFixes associated with that error.
-	FindAnalysisError(ctx context.Context, pkgID, analyzerName, msg string, rng protocol.Range) (*Error, error)
+	Analyze(ctx context.Context, pkgID string, analyzers ...*analysis.Analyzer) ([]*Error, error)
 
 	// ModTidyHandle returns a ModTidyHandle for the given go.mod file handle.
 	// This function can have no data or error if there is no modfile detected.
@@ -124,6 +121,9 @@ type View interface {
 
 	// Ignore returns true if this file should be ignored by this view.
 	Ignore(span.URI) bool
+
+	// WriteEnv writes the view-specific environment to the io.Writer.
+	WriteEnv(ctx context.Context, w io.Writer) error
 
 	// RunProcessEnvFunc runs fn with the process env for this snapshot's view.
 	// Note: the process env contains cached module and filesystem state.
@@ -358,6 +358,29 @@ const (
 	Sum
 	UnknownKind
 )
+
+// Analyzer represents a go/analysis analyzer with some boolean properties
+// that let the user know how to use the analyzer.
+type Analyzer struct {
+	Analyzer *analysis.Analyzer
+	enabled  bool
+
+	// If this is true, then we can apply the suggested fixes
+	// as part of a source.FixAll codeaction.
+	HighConfidence bool
+
+	// FixesError is only set for type-error analyzers.
+	// It reports true if the message provided indicates an error that could be
+	// fixed by the analyzer.
+	FixesError func(msg string) bool
+}
+
+func (a Analyzer) Enabled(snapshot Snapshot) bool {
+	if enabled, ok := snapshot.View().Options().UserEnabledAnalyses[a.Analyzer.Name]; ok {
+		return enabled
+	}
+	return a.enabled
+}
 
 // Package represents a Go package that has been type-checked. It maintains
 // only the relevant fields of a *go/packages.Package.

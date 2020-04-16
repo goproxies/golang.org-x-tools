@@ -15,12 +15,10 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"regexp"
 	"strings"
 	"sync"
 	"time"
 
-	"golang.org/x/tools/go/packages"
 	"golang.org/x/tools/internal/gocommand"
 	"golang.org/x/tools/internal/imports"
 	"golang.org/x/tools/internal/lsp/debug"
@@ -37,7 +35,8 @@ type view struct {
 	session *Session
 	id      string
 
-	options source.Options
+	optionsMu sync.Mutex
+	options   source.Options
 
 	// mu protects most mutable state of the view.
 	mu sync.Mutex
@@ -110,9 +109,8 @@ type view struct {
 	// `go env` variables that need to be tracked.
 	gopath, gocache string
 
-	// LoadMu guards packages.Load calls and associated state.
-	loadMu         sync.Mutex
-	serializeLoads int
+	// gocmdRunner guards go command calls from concurrency errors.
+	gocmdRunner *gocommand.Runner
 }
 
 type builtinPackageHandle struct {
@@ -172,6 +170,8 @@ func (v *view) Folder() span.URI {
 }
 
 func (v *view) Options() source.Options {
+	v.optionsMu.Lock()
+	defer v.optionsMu.Unlock()
 	return v.options
 }
 
@@ -189,16 +189,19 @@ func minorOptionsChange(a, b source.Options) bool {
 
 func (v *view) SetOptions(ctx context.Context, options source.Options) (source.View, error) {
 	// no need to rebuild the view if the options were not materially changed
+	v.optionsMu.Lock()
 	if minorOptionsChange(v.options, options) {
 		v.options = options
+		v.optionsMu.Unlock()
 		return v, nil
 	}
+	v.optionsMu.Unlock()
 	newView, _, err := v.session.updateView(ctx, v, options)
 	return newView, err
 }
 
 func (v *view) Rebuild(ctx context.Context) (source.Snapshot, error) {
-	_, snapshot, err := v.session.updateView(ctx, v, v.options)
+	_, snapshot, err := v.session.updateView(ctx, v, v.Options())
 	return snapshot, err
 }
 
@@ -259,6 +262,26 @@ func (v *view) buildBuiltinPackage(ctx context.Context, goFiles []string) error 
 		handle: h,
 		file:   pgh,
 	}
+	return nil
+}
+
+func (v *view) WriteEnv(ctx context.Context, w io.Writer) error {
+	v.optionsMu.Lock()
+	env, buildFlags := v.envLocked()
+	v.optionsMu.Unlock()
+	// TODO(rstambler): We could probably avoid running this by saving the
+	// output on original create, but I'm not sure if it's worth it.
+	inv := gocommand.Invocation{
+		Verb:       "env",
+		Env:        env,
+		WorkingDir: v.Folder().Filename(),
+	}
+	stdout, err := v.gocmdRunner.Run(ctx, inv)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(w, "go env for %v\n(valid build configuration = %v)\n(build flags: %v)\n", v.folder.Filename(), v.hasValidBuildConfiguration, buildFlags)
+	fmt.Fprint(w, stdout)
 	return nil
 }
 
@@ -330,13 +353,17 @@ func (v *view) refreshProcessEnv() {
 }
 
 func (v *view) buildProcessEnv(ctx context.Context) (*imports.ProcessEnv, error) {
-	env, buildFlags := v.env()
+	v.optionsMu.Lock()
+	env, buildFlags := v.envLocked()
+	localPrefix, verboseOutput := v.options.LocalPrefix, v.options.VerboseOutput
+	v.optionsMu.Unlock()
 	processEnv := &imports.ProcessEnv{
 		WorkingDir:  v.folder.Filename(),
 		BuildFlags:  buildFlags,
-		LocalPrefix: v.options.LocalPrefix,
+		LocalPrefix: localPrefix,
+		GocmdRunner: v.gocmdRunner,
 	}
-	if v.options.VerboseOutput {
+	if verboseOutput {
 		processEnv.Logf = func(format string, args ...interface{}) {
 			event.Print(ctx, fmt.Sprintf(format, args...))
 		}
@@ -364,7 +391,7 @@ func (v *view) buildProcessEnv(ctx context.Context) (*imports.ProcessEnv, error)
 	return processEnv, nil
 }
 
-func (v *view) env() ([]string, []string) {
+func (v *view) envLocked() ([]string, []string) {
 	// We want to run the go commands with the -modfile flag if the version of go
 	// that we are using supports it.
 	buildFlags := v.options.BuildFlags
@@ -579,6 +606,9 @@ func (v *view) cancelBackground() {
 }
 
 func (v *view) setBuildInformation(ctx context.Context, folder span.URI, env []string, modfileFlagEnabled bool) error {
+	if err := checkPathCase(folder.Filename()); err != nil {
+		return fmt.Errorf("invalid workspace configuration: %v", err)
+	}
 	// Make sure to get the `go env` before continuing with initialization.
 	gomod, err := v.getGoEnv(ctx, env)
 	if err != nil {
@@ -640,6 +670,13 @@ func (v *view) setBuildInformation(ctx context.Context, folder span.URI, env []s
 	return nil
 }
 
+// OS-specific path case check, for case-insensitive filesystems.
+var checkPathCase = defaultCheckPathCase
+
+func defaultCheckPathCase(path string) error {
+	return nil
+}
+
 func checkBuildConfiguration(goCommand bool, mod, folder span.URI, gopath string) bool {
 	// Since we only really understand the `go` command, if the user is not
 	// using the go command, assume that their configuration is valid.
@@ -695,7 +732,7 @@ func (v *view) getGoEnv(ctx context.Context, env []string) (string, error) {
 		Env:        env,
 		WorkingDir: v.Folder().Filename(),
 	}
-	stdout, err := inv.Run(ctx)
+	stdout, err := v.gocmdRunner.Run(ctx, inv)
 	if err != nil {
 		return "", err
 	}
@@ -728,50 +765,6 @@ func (v *view) getGoEnv(ctx context.Context, env []string) (string, error) {
 	return "", nil
 }
 
-// 1.13: go: updates to go.mod needed, but contents have changed
-// 1.14: go: updating go.mod: existing contents have changed since last read
-var modConcurrencyError = regexp.MustCompile(`go:.*go.mod.*contents have changed`)
-
-// LoadPackages calls packages.Load, serializing requests if they fight over
-// go.mod changes.
-func (v *view) loadPackages(cfg *packages.Config, patterns ...string) ([]*packages.Package, error) {
-	// We want to run go list calls concurrently as much as possible. However,
-	// if go.mod updates are needed, only one can make them and the others will
-	// fail. We need to retry in those cases, but we don't want to thrash so
-	// badly we never recover. To avoid that, once we've seen one concurrency
-	// error, start serializing everything until the backlog has cleared out.
-	// This could all be avoided on 1.14 by using multiple -modfiles.
-
-	v.loadMu.Lock()
-	var locked bool // If true, we hold the mutex and have incremented.
-	if v.serializeLoads == 0 {
-		v.loadMu.Unlock()
-	} else {
-		locked = true
-		v.serializeLoads++
-	}
-	defer func() {
-		if locked {
-			v.serializeLoads--
-			v.loadMu.Unlock()
-		}
-	}()
-
-	for {
-		pkgs, err := packages.Load(cfg, patterns...)
-		if err == nil || !modConcurrencyError.MatchString(err.Error()) {
-			return pkgs, err
-		}
-
-		event.Error(cfg.Context, "Load concurrency error, will retry serially", err)
-		if !locked {
-			v.loadMu.Lock()
-			v.serializeLoads++
-			locked = true
-		}
-	}
-}
-
 // This function will return the main go.mod file for this folder if it exists and whether the -modfile
 // flag exists for this version of go.
 func (v *view) modfileFlagExists(ctx context.Context, env []string) (bool, error) {
@@ -785,7 +778,7 @@ func (v *view) modfileFlagExists(ctx context.Context, env []string) (bool, error
 		Env:        append(env, "GO111MODULE=off"),
 		WorkingDir: v.Folder().Filename(),
 	}
-	stdout, err := inv.Run(ctx)
+	stdout, err := v.gocmdRunner.Run(ctx, inv)
 	if err != nil {
 		return false, err
 	}

@@ -203,27 +203,29 @@ func (s *Server) didModifyFiles(ctx context.Context, modifications []source.File
 		snapshotSet[snapshot] = append(snapshotSet[snapshot], uri)
 	}
 	for snapshot, uris := range snapshotSet {
-		for _, uri := range uris {
-			fh, err := snapshot.GetFile(uri)
-			if err != nil {
-				return nil, err
-			}
-			// If a modification comes in for the view's go.mod file and the view
-			// was never properly initialized, or the view does not have
-			// a go.mod file, try to recreate the associated view.
-			switch fh.Identity().Kind {
-			case source.Mod:
-				modfile, _ := snapshot.View().ModFiles()
-				if modfile != "" || fh.Identity().URI != modfile {
+		// If a modification comes in for the view's go.mod file and the view
+		// was never properly initialized, or the view does not have
+		// a go.mod file, try to recreate the associated view.
+		if modfile, _ := snapshot.View().ModFiles(); modfile == "" {
+			for _, uri := range uris {
+				// Don't rebuild the view until the go.mod is on disk.
+				if !snapshot.IsSaved(uri) {
 					continue
 				}
-				newSnapshot, err := snapshot.View().Rebuild(ctx)
+				fh, err := snapshot.GetFile(uri)
 				if err != nil {
 					return nil, err
 				}
-				// Update the snapshot to the rebuilt one.
-				snapshot = newSnapshot
-				snapshotByURI[uri] = snapshot
+				switch fh.Identity().Kind {
+				case source.Mod:
+					newSnapshot, err := snapshot.View().Rebuild(ctx)
+					if err != nil {
+						return nil, err
+					}
+					// Update the snapshot to the rebuilt one.
+					snapshot = newSnapshot
+					snapshotByURI[uri] = newSnapshot
+				}
 			}
 		}
 		go s.diagnoseSnapshot(snapshot)
@@ -241,7 +243,7 @@ func (s *Server) wasFirstChange(uri span.URI) bool {
 
 func (s *Server) changedText(ctx context.Context, uri span.URI, changes []protocol.TextDocumentContentChangeEvent) ([]byte, error) {
 	if len(changes) == 0 {
-		return nil, jsonrpc2.NewErrorf(jsonrpc2.CodeInternalError, "no content changes provided")
+		return nil, fmt.Errorf("%w: no content changes provided", jsonrpc2.ErrInternal)
 	}
 
 	// Check if the client sent the full content of the file.
@@ -255,7 +257,7 @@ func (s *Server) changedText(ctx context.Context, uri span.URI, changes []protoc
 func (s *Server) applyIncrementalChanges(ctx context.Context, uri span.URI, changes []protocol.TextDocumentContentChangeEvent) ([]byte, error) {
 	content, _, err := s.session.GetFile(uri).Read(ctx)
 	if err != nil {
-		return nil, jsonrpc2.NewErrorf(jsonrpc2.CodeInternalError, "file not found (%v)", err)
+		return nil, fmt.Errorf("%w: file not found (%v)", jsonrpc2.ErrInternal, err)
 	}
 	for _, change := range changes {
 		// Make sure to update column mapper along with the content.
@@ -266,18 +268,18 @@ func (s *Server) applyIncrementalChanges(ctx context.Context, uri span.URI, chan
 			Content:   content,
 		}
 		if change.Range == nil {
-			return nil, jsonrpc2.NewErrorf(jsonrpc2.CodeInternalError, "unexpected nil range for change")
+			return nil, fmt.Errorf("%w: unexpected nil range for change", jsonrpc2.ErrInternal)
 		}
 		spn, err := m.RangeSpan(*change.Range)
 		if err != nil {
 			return nil, err
 		}
 		if !spn.HasOffset() {
-			return nil, jsonrpc2.NewErrorf(jsonrpc2.CodeInternalError, "invalid range for content change")
+			return nil, fmt.Errorf("%w: invalid range for content change", jsonrpc2.ErrInternal)
 		}
 		start, end := spn.Start().Offset(), spn.End().Offset()
 		if end < start {
-			return nil, jsonrpc2.NewErrorf(jsonrpc2.CodeInternalError, "invalid range for content change")
+			return nil, fmt.Errorf("%w: invalid range for content change", jsonrpc2.ErrInternal)
 		}
 		var buf bytes.Buffer
 		buf.Write(content[:start])

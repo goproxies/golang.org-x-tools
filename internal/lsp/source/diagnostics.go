@@ -42,7 +42,7 @@ type RelatedInformation struct {
 	Message string
 }
 
-func Diagnostics(ctx context.Context, snapshot Snapshot, ph PackageHandle, missingModules map[string]*modfile.Require, withAnalysis bool) (map[FileIdentity][]Diagnostic, bool, error) {
+func Diagnostics(ctx context.Context, snapshot Snapshot, ph PackageHandle, missingModules map[string]*modfile.Require, withAnalysis bool) (map[FileIdentity][]*Diagnostic, bool, error) {
 	// If we are missing dependencies, it may because the user's workspace is
 	// not correctly configured. Report errors, if possible.
 	var warn bool
@@ -83,7 +83,7 @@ func Diagnostics(ctx context.Context, snapshot Snapshot, ph PackageHandle, missi
 	}
 
 	// Prepare the reports we will send for the files in this package.
-	reports := make(map[FileIdentity][]Diagnostic)
+	reports := make(map[FileIdentity][]*Diagnostic)
 	for _, fh := range pkg.CompiledGoFiles() {
 		if err := clearReports(snapshot, reports, fh.File().Identity().URI); err != nil {
 			return nil, warn, err
@@ -113,28 +113,33 @@ func Diagnostics(ctx context.Context, snapshot Snapshot, ph PackageHandle, missi
 		}
 	}
 	// Run diagnostics for the package that this URI belongs to.
-	hadDiagnostics, err := diagnostics(ctx, snapshot, reports, pkg, len(ph.MissingDependencies()) > 0)
+	hadDiagnostics, hadTypeErrors, err := diagnostics(ctx, snapshot, reports, pkg, len(ph.MissingDependencies()) > 0)
 	if err != nil {
 		return nil, warn, err
 	}
-	if !hadDiagnostics && withAnalysis {
-		// Exit early if the context has been canceled. This also protects us
-		// from a race on Options, see golang/go#36699.
+	if hadDiagnostics || !withAnalysis {
+		return reports, warn, nil
+	}
+	// Exit early if the context has been canceled. This also protects us
+	// from a race on Options, see golang/go#36699.
+	if ctx.Err() != nil {
+		return nil, warn, ctx.Err()
+	}
+	// If we don't have any list or parse errors, run analyses.
+	analyzers := snapshot.View().Options().DefaultAnalyzers
+	if hadTypeErrors {
+		analyzers = snapshot.View().Options().TypeErrorAnalyzers
+	}
+	if err := analyses(ctx, snapshot, reports, ph, analyzers); err != nil {
+		event.Error(ctx, "analyses failed", err, tag.Snapshot.Of(snapshot.ID()), tag.Package.Of(ph.ID()))
 		if ctx.Err() != nil {
 			return nil, warn, ctx.Err()
-		}
-		// If we don't have any list, parse, or type errors, run analyses.
-		if err := analyses(ctx, snapshot, reports, ph, snapshot.View().Options().DisabledAnalyses); err != nil {
-			if ctx.Err() != nil {
-				return nil, warn, ctx.Err()
-			}
-			event.Error(ctx, "failed to run analyses", err, tag.Package.Of(ph.ID()))
 		}
 	}
 	return reports, warn, nil
 }
 
-func FileDiagnostics(ctx context.Context, snapshot Snapshot, uri span.URI) (FileIdentity, []Diagnostic, error) {
+func FileDiagnostics(ctx context.Context, snapshot Snapshot, uri span.URI) (FileIdentity, []*Diagnostic, error) {
 	fh, err := snapshot.GetFile(uri)
 	if err != nil {
 		return FileIdentity{}, nil, err
@@ -162,7 +167,7 @@ type diagnosticSet struct {
 	listErrors, parseErrors, typeErrors []*Diagnostic
 }
 
-func diagnostics(ctx context.Context, snapshot Snapshot, reports map[FileIdentity][]Diagnostic, pkg Package, hasMissingDeps bool) (bool, error) {
+func diagnostics(ctx context.Context, snapshot Snapshot, reports map[FileIdentity][]*Diagnostic, pkg Package, hasMissingDeps bool) (bool, bool, error) {
 	ctx, done := event.StartSpan(ctx, "source.diagnostics", tag.Package.Of(pkg.ID()))
 	_ = ctx // circumvent SA4006
 	defer done()
@@ -191,29 +196,28 @@ func diagnostics(ctx context.Context, snapshot Snapshot, reports map[FileIdentit
 			diag.Source = "go list"
 		}
 	}
-	var nonEmptyDiagnostics bool // track if we actually send non-empty diagnostics
+	var nonEmptyDiagnostics, hasTypeErrors bool // track if we actually send non-empty diagnostics
 	for uri, set := range diagSets {
 		// Don't report type errors if there are parse errors or list errors.
 		diags := set.typeErrors
 		if len(set.parseErrors) > 0 {
-			diags = set.parseErrors
+			diags, nonEmptyDiagnostics = set.parseErrors, true
 		} else if len(set.listErrors) > 0 {
 			// Only show list errors if the package has missing dependencies.
 			if hasMissingDeps {
-				diags = set.listErrors
+				diags, nonEmptyDiagnostics = set.listErrors, true
 			}
+		} else if len(set.typeErrors) > 0 {
+			hasTypeErrors = true
 		}
-		if len(diags) > 0 {
-			nonEmptyDiagnostics = true
-		}
-		if err := addReports(ctx, snapshot, reports, uri, diags...); err != nil {
-			return false, err
+		if err := addReports(snapshot, reports, uri, diags...); err != nil {
+			return false, false, err
 		}
 	}
-	return nonEmptyDiagnostics, nil
+	return nonEmptyDiagnostics, hasTypeErrors, nil
 }
 
-func missingModulesDiagnostics(ctx context.Context, snapshot Snapshot, reports map[FileIdentity][]Diagnostic, missingModules map[string]*modfile.Require, uri span.URI) error {
+func missingModulesDiagnostics(ctx context.Context, snapshot Snapshot, reports map[FileIdentity][]*Diagnostic, missingModules map[string]*modfile.Require, uri span.URI) error {
 	if snapshot.View().Ignore(uri) || len(missingModules) == 0 {
 		return nil
 	}
@@ -223,7 +227,6 @@ func missingModulesDiagnostics(ctx context.Context, snapshot Snapshot, reports m
 	}
 	file, _, m, _, err := snapshot.View().Session().Cache().ParseGoHandle(fh, ParseHeader).Parse(ctx)
 	if err != nil {
-		event.Error(ctx, "could not parse go file when checking for missing modules", err)
 		return err
 	}
 	// Make a dependency->import map to improve performance when finding missing dependencies.
@@ -241,7 +244,7 @@ func missingModulesDiagnostics(ctx context.Context, snapshot Snapshot, reports m
 		return nil
 	}
 	if reports[fh.Identity()] == nil {
-		reports[fh.Identity()] = []Diagnostic{}
+		reports[fh.Identity()] = []*Diagnostic{}
 	}
 	for mod, req := range missingModules {
 		if req.Syntax == nil {
@@ -259,7 +262,7 @@ func missingModulesDiagnostics(ctx context.Context, snapshot Snapshot, reports m
 		if err != nil {
 			return err
 		}
-		reports[fh.Identity()] = append(reports[fh.Identity()], Diagnostic{
+		reports[fh.Identity()] = append(reports[fh.Identity()], &Diagnostic{
 			Message:  fmt.Sprintf("%s is not in your go.mod file.", req.Mod.Path),
 			Range:    rng,
 			Source:   "go mod tidy",
@@ -269,30 +272,29 @@ func missingModulesDiagnostics(ctx context.Context, snapshot Snapshot, reports m
 	return nil
 }
 
-func analyses(ctx context.Context, snapshot Snapshot, reports map[FileIdentity][]Diagnostic, ph PackageHandle, disabledAnalyses map[string]struct{}) error {
+func analyses(ctx context.Context, snapshot Snapshot, reports map[FileIdentity][]*Diagnostic, ph PackageHandle, analyses map[string]Analyzer) error {
 	var analyzers []*analysis.Analyzer
-	for _, a := range snapshot.View().Options().Analyzers {
-		if _, ok := disabledAnalyses[a.Name]; ok {
+	for _, a := range analyses {
+		if !a.Enabled(snapshot) {
 			continue
 		}
-		analyzers = append(analyzers, a)
+		analyzers = append(analyzers, a.Analyzer)
 	}
-
-	diagnostics, err := snapshot.Analyze(ctx, ph.ID(), analyzers)
+	analysisErrors, err := snapshot.Analyze(ctx, ph.ID(), analyzers...)
 	if err != nil {
 		return err
 	}
 
 	// Report diagnostics and errors from root analyzers.
-	for _, e := range diagnostics {
+	for _, e := range analysisErrors {
 		// This is a bit of a hack, but clients > 3.15 will be able to grey out unnecessary code.
 		// If we are deleting code as part of all of our suggested fixes, assume that this is dead code.
-		// TODO(golang/go/#34508): Return these codes from the diagnostics themselves.
+		// TODO(golang/go#34508): Return these codes from the diagnostics themselves.
 		var tags []protocol.DiagnosticTag
 		if onlyDeletions(e.SuggestedFixes) {
 			tags = append(tags, protocol.Unnecessary)
 		}
-		if err := addReports(ctx, snapshot, reports, e.URI, &Diagnostic{
+		if err := addReports(snapshot, reports, e.URI, &Diagnostic{
 			Range:          e.Range,
 			Message:        e.Message,
 			Source:         e.Category,
@@ -307,7 +309,7 @@ func analyses(ctx context.Context, snapshot Snapshot, reports map[FileIdentity][
 	return nil
 }
 
-func clearReports(snapshot Snapshot, reports map[FileIdentity][]Diagnostic, uri span.URI) error {
+func clearReports(snapshot Snapshot, reports map[FileIdentity][]*Diagnostic, uri span.URI) error {
 	if snapshot.View().Ignore(uri) {
 		return nil
 	}
@@ -315,11 +317,11 @@ func clearReports(snapshot Snapshot, reports map[FileIdentity][]Diagnostic, uri 
 	if err != nil {
 		return err
 	}
-	reports[fh.Identity()] = []Diagnostic{}
+	reports[fh.Identity()] = []*Diagnostic{}
 	return nil
 }
 
-func addReports(ctx context.Context, snapshot Snapshot, reports map[FileIdentity][]Diagnostic, uri span.URI, diagnostics ...*Diagnostic) error {
+func addReports(snapshot Snapshot, reports map[FileIdentity][]*Diagnostic, uri span.URI, diagnostics ...*Diagnostic) error {
 	if snapshot.View().Ignore(uri) {
 		return nil
 	}
@@ -327,15 +329,28 @@ func addReports(ctx context.Context, snapshot Snapshot, reports map[FileIdentity
 	if err != nil {
 		return err
 	}
-	if _, ok := reports[fh.Identity()]; !ok {
+	identity := fh.Identity()
+	existingDiagnostics, ok := reports[identity]
+	if !ok {
 		return errors.Errorf("diagnostics for unexpected file %s", uri)
 	}
-	for _, diag := range diagnostics {
-		if diag == nil {
-			continue
+	if len(diagnostics) == 1 {
+		d1 := diagnostics[0]
+		if _, ok := snapshot.View().Options().TypeErrorAnalyzers[d1.Source]; ok {
+			for i, d2 := range existingDiagnostics {
+				if r := protocol.CompareRange(d1.Range, d2.Range); r != 0 {
+					continue
+				}
+				if d1.Message != d2.Message {
+					continue
+				}
+				reports[identity][i].SuggestedFixes = append(reports[identity][i].SuggestedFixes, d1.SuggestedFixes...)
+				reports[identity][i].Tags = append(reports[identity][i].Tags, d1.Tags...)
+			}
+			return nil
 		}
-		reports[fh.Identity()] = append(reports[fh.Identity()], *diag)
 	}
+	reports[fh.Identity()] = append(reports[fh.Identity()], diagnostics...)
 	return nil
 }
 

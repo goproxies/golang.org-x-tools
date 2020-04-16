@@ -5,11 +5,9 @@
 package cache
 
 import (
-	"context"
 	"go/ast"
 	"go/types"
 
-	"golang.org/x/tools/internal/lsp/protocol"
 	"golang.org/x/tools/internal/lsp/source"
 	"golang.org/x/tools/internal/packagesinternal"
 	"golang.org/x/tools/internal/span"
@@ -23,11 +21,12 @@ type pkg struct {
 	pkgPath         packagePath
 	mode            source.ParseMode
 	forTest         packagePath
-	goFiles         []source.ParseGoHandle
-	compiledGoFiles []source.ParseGoHandle
+	goFiles         []*parseGoHandle
+	compiledGoFiles []*parseGoHandle
 	errors          []*source.Error
 	imports         map[packagePath]*pkg
 	module          *packagesinternal.Module
+	typeErrors      []types.Error
 	types           *types.Package
 	typesInfo       *types.Info
 	typesSizes      types.Sizes
@@ -53,7 +52,11 @@ func (p *pkg) PkgPath() string {
 }
 
 func (p *pkg) CompiledGoFiles() []source.ParseGoHandle {
-	return p.compiledGoFiles
+	var files []source.ParseGoHandle
+	for _, f := range p.compiledGoFiles {
+		files = append(files, f)
+	}
+	return files
 }
 
 func (p *pkg) File(uri span.URI) (source.ParseGoHandle, error) {
@@ -123,32 +126,4 @@ func (p *pkg) Imports() []source.Package {
 
 func (p *pkg) Module() *packagesinternal.Module {
 	return p.module
-}
-
-func (s *snapshot) FindAnalysisError(ctx context.Context, pkgID, analyzerName, msg string, rng protocol.Range) (*source.Error, error) {
-	analyzer, ok := s.View().Options().Analyzers[analyzerName]
-	if !ok {
-		return nil, errors.Errorf("unexpected analyzer: %s", analyzerName)
-	}
-	act, err := s.actionHandle(ctx, packageID(pkgID), analyzer)
-	if err != nil {
-		return nil, err
-	}
-	errs, _, err := act.analyze(ctx)
-	if err != nil {
-		return nil, err
-	}
-	for _, err := range errs {
-		if err.Category != analyzerName {
-			continue
-		}
-		if err.Message != msg {
-			continue
-		}
-		if protocol.CompareRange(err.Range, rng) != 0 {
-			continue
-		}
-		return err, nil
-	}
-	return nil, errors.Errorf("no matching diagnostic for %s:%v", pkgID, analyzerName)
 }

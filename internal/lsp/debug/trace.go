@@ -73,12 +73,12 @@ type traceEvent struct {
 	Tags   string
 }
 
-func (t *traces) ProcessEvent(ctx context.Context, ev event.Event) (context.Context, event.Event) {
+func (t *traces) ProcessEvent(ctx context.Context, ev event.Event, tags event.TagMap) context.Context {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	span := export.GetSpan(ctx)
 	if span == nil {
-		return ctx, ev
+		return ctx
 	}
 
 	switch {
@@ -93,19 +93,19 @@ func (t *traces) ProcessEvent(ctx context.Context, ev event.Event) (context.Cont
 			SpanID:   span.ID.SpanID,
 			ParentID: span.ParentID,
 			Name:     span.Name,
-			Start:    span.Start,
-			Tags:     renderTags(span.Tags),
+			Start:    span.Start().At,
+			Tags:     renderTags(span.Start()),
 		}
 		t.unfinished[span.ID] = td
 		// and wire up parents if we have them
 		if !span.ParentID.IsValid() {
-			return ctx, ev
+			return ctx
 		}
 		parentID := export.SpanContext{TraceID: span.ID.TraceID, SpanID: span.ParentID}
 		parent, found := t.unfinished[parentID]
 		if !found {
 			// trace had an invalid parent, so it cannot itself be valid
-			return ctx, ev
+			return ctx
 		}
 		parent.Children = append(parent.Children, td)
 
@@ -113,17 +113,18 @@ func (t *traces) ProcessEvent(ctx context.Context, ev event.Event) (context.Cont
 		// finishing, must be already in the map
 		td, found := t.unfinished[span.ID]
 		if !found {
-			return ctx, ev // if this happens we are in a bad place
+			return ctx // if this happens we are in a bad place
 		}
 		delete(t.unfinished, span.ID)
 
-		td.Finish = span.Finish
-		td.Duration = span.Finish.Sub(span.Start)
-		td.Events = make([]traceEvent, len(span.Events))
-		for i, event := range span.Events {
+		td.Finish = span.Finish().At
+		td.Duration = span.Finish().At.Sub(span.Start().At)
+		events := span.Events()
+		td.Events = make([]traceEvent, len(events))
+		for i, event := range events {
 			td.Events[i] = traceEvent{
 				Time: event.At,
-				Tags: renderTags(event.Tags),
+				Tags: renderTags(event),
 			}
 		}
 
@@ -140,7 +141,7 @@ func (t *traces) ProcessEvent(ctx context.Context, ev event.Event) (context.Cont
 			fillOffsets(td, td.Start)
 		}
 	}
-	return ctx, ev
+	return ctx
 }
 
 func (t *traces) getData(req *http.Request) interface{} {
@@ -171,8 +172,10 @@ func fillOffsets(td *traceData, start time.Time) {
 
 func renderTags(tags event.TagList) string {
 	buf := &bytes.Buffer{}
-	for _, tag := range tags {
-		fmt.Fprintf(buf, "%s=%q ", tag.Key().Name(), tag.Value())
+	for index := 0; tags.Valid(index); index++ {
+		if tag := tags.Tag(index); tag.Valid() {
+			fmt.Fprintf(buf, "%v ", tag)
+		}
 	}
 	return buf.String()
 }

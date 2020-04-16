@@ -7,24 +7,25 @@ package lsp
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path"
 
 	"golang.org/x/tools/internal/jsonrpc2"
 	"golang.org/x/tools/internal/lsp/debug"
+	"golang.org/x/tools/internal/lsp/debug/tag"
 	"golang.org/x/tools/internal/lsp/protocol"
 	"golang.org/x/tools/internal/lsp/source"
 	"golang.org/x/tools/internal/span"
 	"golang.org/x/tools/internal/telemetry/event"
-	errors "golang.org/x/xerrors"
 )
 
 func (s *Server) initialize(ctx context.Context, params *protocol.ParamInitialize) (*protocol.InitializeResult, error) {
 	s.stateMu.Lock()
 	if s.state >= serverInitializing {
 		defer s.stateMu.Unlock()
-		return nil, jsonrpc2.NewErrorf(jsonrpc2.CodeInvalidRequest, "initialize called while server in %v state", s.state)
+		return nil, fmt.Errorf("%w: initialize called while server in %v state", jsonrpc2.ErrInvalidRequest, s.state)
 	}
 	s.state = serverInitializing
 	s.stateMu.Unlock()
@@ -39,6 +40,9 @@ func (s *Server) initialize(ctx context.Context, params *protocol.ParamInitializ
 	source.SetOptions(&options, params.InitializationOptions)
 	options.ForClientCapabilities(params.Capabilities)
 
+	if !params.RootURI.SpanURI().IsFile() {
+		return nil, fmt.Errorf("unsupported URI scheme: %v (gopls only supports file URIs)", params.RootURI)
+	}
 	s.pendingFolders = params.WorkspaceFolders
 	if len(s.pendingFolders) == 0 {
 		if params.RootURI != "" {
@@ -49,7 +53,7 @@ func (s *Server) initialize(ctx context.Context, params *protocol.ParamInitializ
 		} else {
 			// No folders and no root--we are in single file mode.
 			// TODO: https://golang.org/issue/34160.
-			return nil, errors.Errorf("gopls does not yet support editing a single file. Please open a directory.")
+			return nil, errors.New("gopls does not yet support editing a single file. Please open a directory.")
 		}
 	}
 
@@ -114,7 +118,7 @@ func (s *Server) initialized(ctx context.Context, params *protocol.InitializedPa
 	s.stateMu.Lock()
 	if s.state >= serverInitialized {
 		defer s.stateMu.Unlock()
-		return jsonrpc2.NewErrorf(jsonrpc2.CodeInvalidRequest, "initalized called while server in %v state", s.state)
+		return fmt.Errorf("%w: initalized called while server in %v state", jsonrpc2.ErrInvalidRequest, s.state)
 	}
 	s.state = serverInitialized
 	s.stateMu.Unlock()
@@ -156,7 +160,7 @@ func (s *Server) initialized(ctx context.Context, params *protocol.InitializedPa
 	}
 
 	buf := &bytes.Buffer{}
-	debug.PrintVersionInfo(buf, true, debug.PlainText)
+	debug.PrintVersionInfo(ctx, buf, true, debug.PlainText)
 	event.Print(ctx, buf.String())
 
 	s.addFolders(ctx, s.pendingFolders)
@@ -171,11 +175,20 @@ func (s *Server) addFolders(ctx context.Context, folders []protocol.WorkspaceFol
 
 	for _, folder := range folders {
 		uri := span.URIFromURI(folder.URI)
-		_, snapshot, err := s.addView(ctx, folder.Name, uri)
+		view, snapshot, err := s.addView(ctx, folder.Name, uri)
 		if err != nil {
 			viewErrors[uri] = err
 			continue
 		}
+		// Print each view's environment.
+		buf := &bytes.Buffer{}
+		if err := view.WriteEnv(ctx, buf); err != nil {
+			event.Error(ctx, "failed to write environment", err, tag.Directory.Of(view.Folder()))
+			continue
+		}
+		event.Print(ctx, buf.String())
+
+		// Diagnose the newly created view.
 		go s.diagnoseDetached(snapshot)
 	}
 	if len(viewErrors) > 0 {

@@ -43,6 +43,9 @@ func (s *snapshot) load(ctx context.Context, scopes ...interface{}) error {
 	for _, scope := range scopes {
 		switch scope := scope.(type) {
 		case packagePath:
+			if scope == "command-line-arguments" {
+				panic("attempted to load command-line-arguments")
+			}
 			// The only time we pass package paths is when we're doing a
 			// partial workspace load. In those cases, the paths came back from
 			// go list and should already be GOPATH-vendorized when appropriate.
@@ -81,7 +84,7 @@ func (s *snapshot) load(ctx context.Context, scopes ...interface{}) error {
 	defer done()
 
 	cfg := s.Config(ctx)
-	pkgs, err := s.view.loadPackages(cfg, query...)
+	pkgs, err := packages.Load(cfg, query...)
 
 	// If the context was canceled, return early. Otherwise, we might be
 	// type-checking an incomplete result. Check the context directly,
@@ -90,7 +93,7 @@ func (s *snapshot) load(ctx context.Context, scopes ...interface{}) error {
 		return ctx.Err()
 	}
 
-	event.Print(ctx, "go/packages.Load", tag.Snapshot.Of(s.ID()), tag.Query.Of(query), tag.PackageCount.Of(len(pkgs)))
+	event.Print(ctx, "go/packages.Load", tag.Snapshot.Of(s.ID()), tag.Directory.Of(cfg.Dir), tag.Query.Of(query), tag.PackageCount.Of(len(pkgs)))
 	if len(pkgs) == 0 {
 		return err
 	}
@@ -111,7 +114,7 @@ func (s *snapshot) load(ctx context.Context, scopes ...interface{}) error {
 			continue
 		}
 		// Skip test main packages.
-		if isTestMain(ctx, pkg, s.view.gocache) {
+		if isTestMain(pkg, s.view.gocache) {
 			continue
 		}
 		// Set the metadata for this package.
@@ -158,7 +161,7 @@ func (s *snapshot) setMetadata(ctx context.Context, pkgPath packagePath, pkg *pa
 	}
 
 	copied := map[packageID]struct{}{
-		id: struct{}{},
+		id: {},
 	}
 	for k, v := range seen {
 		copied[k] = v
@@ -215,7 +218,7 @@ func (s *snapshot) setMetadata(ctx context.Context, pkgPath packagePath, pkg *pa
 	return m, nil
 }
 
-func isTestMain(ctx context.Context, pkg *packages.Package, gocache string) bool {
+func isTestMain(pkg *packages.Package, gocache string) bool {
 	// Test mains must have an import path that ends with ".test".
 	if !strings.HasSuffix(pkg.PkgPath, ".test") {
 		return false

@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"os"
 	"os/exec"
@@ -34,8 +35,7 @@ type EnvMode int
 const (
 	// Singleton mode uses a separate cache for each test.
 	Singleton EnvMode = 1 << iota
-	// Shared mode uses a Shared cache.
-	Shared
+
 	// Forwarded forwards connections to an in-process gopls instance.
 	Forwarded
 	// SeparateProcess runs a separate gopls process, and forwards connections to
@@ -141,21 +141,20 @@ func (r *Runner) Close() error {
 // Run executes the test function in the default configured gopls execution
 // modes. For each a test run, a new workspace is created containing the
 // un-txtared files specified by filedata.
-func (r *Runner) Run(t *testing.T, filedata string, test func(context.Context, *testing.T, *Env)) {
+func (r *Runner) Run(t *testing.T, filedata string, test func(t *testing.T, e *Env)) {
 	t.Helper()
 	r.RunInMode(r.defaultModes, t, filedata, test)
 }
 
 // RunInMode runs the test in the execution modes specified by the modes bitmask.
-func (r *Runner) RunInMode(modes EnvMode, t *testing.T, filedata string, test func(ctx context.Context, t *testing.T, e *Env)) {
+func (r *Runner) RunInMode(modes EnvMode, t *testing.T, filedata string, test func(t *testing.T, e *Env)) {
 	t.Helper()
 	tests := []struct {
-		name         string
-		mode         EnvMode
-		getConnector func(context.Context, *testing.T) (servertest.Connector, func())
+		name      string
+		mode      EnvMode
+		getServer func(context.Context, *testing.T) jsonrpc2.StreamServer
 	}{
-		{"singleton", Singleton, r.singletonEnv},
-		{"shared", Shared, r.sharedEnv},
+		{"singleton", Singleton, singletonEnv},
 		{"forwarded", Forwarded, r.forwardedEnv},
 		{"separate_process", SeparateProcess, r.separateProcessEnv},
 	}
@@ -169,60 +168,74 @@ func (r *Runner) RunInMode(modes EnvMode, t *testing.T, filedata string, test fu
 			t.Helper()
 			ctx, cancel := context.WithTimeout(context.Background(), r.timeout)
 			defer cancel()
+			ctx = debug.WithInstance(ctx, "", "")
+
 			ws, err := fake.NewWorkspace("lsprpc", []byte(filedata))
 			if err != nil {
 				t.Fatal(err)
 			}
 			defer ws.Close()
-			ts, cleanup := tc.getConnector(ctx, t)
-			defer cleanup()
+			ss := tc.getServer(ctx, t)
+			ls := &loggingServer{delegate: ss}
+			ts := servertest.NewPipeServer(ctx, ls)
+			defer func() {
+				ts.Close()
+			}()
 			env := NewEnv(ctx, t, ws, ts)
 			defer func() {
+				if t.Failed() {
+					ls.printBuffers(t.Name(), os.Stderr)
+				}
 				if err := env.E.Shutdown(ctx); err != nil {
 					panic(err)
 				}
 			}()
-			test(ctx, t, env)
+			test(t, env)
 		})
 	}
 }
 
-func (r *Runner) singletonEnv(ctx context.Context, t *testing.T) (servertest.Connector, func()) {
-	ctx = debug.WithInstance(ctx, "", "")
-	ss := lsprpc.NewStreamServer(cache.New(ctx, nil))
-	ts := servertest.NewPipeServer(ctx, ss)
-	cleanup := func() {
-		ts.Close()
+type loggingServer struct {
+	delegate jsonrpc2.StreamServer
+
+	mu      sync.Mutex
+	buffers []*bytes.Buffer
+}
+
+func (s *loggingServer) ServeStream(ctx context.Context, stream jsonrpc2.Stream) error {
+	s.mu.Lock()
+	var buf bytes.Buffer
+	s.buffers = append(s.buffers, &buf)
+	s.mu.Unlock()
+	logStream := protocol.LoggingStream(stream, &buf)
+	return s.delegate.ServeStream(ctx, logStream)
+}
+
+func (s *loggingServer) printBuffers(testname string, w io.Writer) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for i, buf := range s.buffers {
+		fmt.Fprintf(os.Stderr, "#### Start Gopls Test Logs %d of %d for %q\n", i+1, len(s.buffers), testname)
+		io.Copy(w, buf)
+		fmt.Fprintf(os.Stderr, "#### End Gopls Test Logs %d of %d for %q\n", i+1, len(s.buffers), testname)
 	}
-	return ts, cleanup
 }
 
-func (r *Runner) sharedEnv(ctx context.Context, t *testing.T) (servertest.Connector, func()) {
-	return r.getTestServer(), func() {}
+func singletonEnv(ctx context.Context, t *testing.T) jsonrpc2.StreamServer {
+	return lsprpc.NewStreamServer(cache.New(ctx, nil))
 }
 
-func (r *Runner) forwardedEnv(ctx context.Context, t *testing.T) (servertest.Connector, func()) {
-	ctx = debug.WithInstance(ctx, "", "")
+func (r *Runner) forwardedEnv(ctx context.Context, t *testing.T) jsonrpc2.StreamServer {
 	ts := r.getTestServer()
-	forwarder := lsprpc.NewForwarder("tcp", ts.Addr)
-	ts2 := servertest.NewPipeServer(ctx, forwarder)
-	cleanup := func() {
-		ts2.Close()
-	}
-	return ts2, cleanup
+	return lsprpc.NewForwarder("tcp", ts.Addr)
 }
 
-func (r *Runner) separateProcessEnv(ctx context.Context, t *testing.T) (servertest.Connector, func()) {
-	ctx = debug.WithInstance(ctx, "", "")
-	socket := r.getRemoteSocket(t)
+func (r *Runner) separateProcessEnv(ctx context.Context, t *testing.T) jsonrpc2.StreamServer {
 	// TODO(rfindley): can we use the autostart behavior here, instead of
 	// pre-starting the remote?
-	forwarder := lsprpc.NewForwarder("unix", socket)
-	ts2 := servertest.NewPipeServer(ctx, forwarder)
-	cleanup := func() {
-		ts2.Close()
-	}
-	return ts2, cleanup
+	socket := r.getRemoteSocket(t)
+	return lsprpc.NewForwarder("unix", socket)
 }
 
 // Env holds an initialized fake Editor, Workspace, and Server, which may be
@@ -230,8 +243,8 @@ func (r *Runner) separateProcessEnv(ctx context.Context, t *testing.T) (serverte
 // on any error, so that tests for the happy path may be written without
 // checking errors.
 type Env struct {
-	t   *testing.T
-	ctx context.Context
+	T   *testing.T
+	Ctx context.Context
 
 	// Most tests should not need to access the workspace, editor, server, or
 	// connection, but they are available if needed.
@@ -250,7 +263,8 @@ type Env struct {
 }
 
 // A diagnosticCondition is satisfied when all expectations are simultaneously
-// met. At that point, the 'met' channel is closed.
+// met. At that point, the 'met' channel is closed. On any failure, err is set
+// and the failed channel is closed.
 type diagnosticCondition struct {
 	expectations []DiagnosticExpectation
 	met          chan struct{}
@@ -266,8 +280,8 @@ func NewEnv(ctx context.Context, t *testing.T, ws *fake.Workspace, ts servertest
 		t.Fatal(err)
 	}
 	env := &Env{
-		t:               t,
-		ctx:             ctx,
+		T:               t,
+		Ctx:             ctx,
 		W:               ws,
 		E:               editor,
 		Server:          ts,
@@ -287,7 +301,7 @@ func (e *Env) onDiagnostics(_ context.Context, d *protocol.PublishDiagnosticsPar
 	e.lastDiagnostics[pth] = d
 
 	for id, condition := range e.waiters {
-		if meetsCondition(e.lastDiagnostics, condition.expectations) {
+		if meetsExpectations(e.lastDiagnostics, condition.expectations) {
 			delete(e.waiters, id)
 			close(condition.met)
 		}
@@ -295,9 +309,35 @@ func (e *Env) onDiagnostics(_ context.Context, d *protocol.PublishDiagnosticsPar
 	return nil
 }
 
-func meetsCondition(m map[string]*protocol.PublishDiagnosticsParams, expectations []DiagnosticExpectation) bool {
+// ExpectDiagnostics asserts that the current diagnostics in the editor match
+// the given expectations. It is intended to be used together with Env.Await to
+// allow waiting on simpler diagnostic expectations (for example,
+// AnyDiagnosticsACurrenttVersion), followed by more detailed expectations
+// tested by ExpectDiagnostics.
+//
+// For example:
+//  env.RegexpReplace("foo.go", "a", "x")
+//  env.Await(env.AnyDiagnosticAtCurrentVersion("foo.go"))
+//  env.ExpectDiagnostics(env.DiagnosticAtRegexp("foo.go", "x"))
+//
+// This has the advantage of not timing out if the diagnostic received for
+// "foo.go" does not match the expectation: instead it fails early.
+func (e *Env) ExpectDiagnostics(expectations ...DiagnosticExpectation) {
+	e.T.Helper()
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if !meetsExpectations(e.lastDiagnostics, expectations) {
+		e.T.Fatalf("diagnostic are unmet:\n%s\nlast diagnostics:\n%s", summarizeExpectations(expectations), formatDiagnostics(e.lastDiagnostics))
+	}
+}
+
+func meetsExpectations(m map[string]*protocol.PublishDiagnosticsParams, expectations []DiagnosticExpectation) bool {
 	for _, e := range expectations {
-		if !e.IsMet(m) {
+		diags, ok := m[e.Path]
+		if !ok {
+			return false
+		}
+		if !e.IsMet(diags) {
 			return false
 		}
 	}
@@ -307,32 +347,58 @@ func meetsCondition(m map[string]*protocol.PublishDiagnosticsParams, expectation
 // A DiagnosticExpectation is a condition that must be met by the current set
 // of diagnostics.
 type DiagnosticExpectation struct {
-	IsMet       func(map[string]*protocol.PublishDiagnosticsParams) bool
+	// IsMet determines whether the diagnostics for this file version satisfy our
+	// expectation.
+	IsMet func(*protocol.PublishDiagnosticsParams) bool
+	// Description is a human-readable description of the diagnostic expectation.
 	Description string
+	// Path is the workspace-relative path to the file being asserted on.
+	Path string
 }
 
 // EmptyDiagnostics asserts that diagnostics are empty for the
 // workspace-relative path name.
 func EmptyDiagnostics(name string) DiagnosticExpectation {
-	isMet := func(diags map[string]*protocol.PublishDiagnosticsParams) bool {
-		ds, ok := diags[name]
-		return ok && len(ds.Diagnostics) == 0
+	isMet := func(diags *protocol.PublishDiagnosticsParams) bool {
+		return len(diags.Diagnostics) == 0
 	}
 	return DiagnosticExpectation{
 		IsMet:       isMet,
-		Description: fmt.Sprintf("empty diagnostics for %q", name),
+		Description: "empty diagnostics",
+		Path:        name,
 	}
+}
+
+// AnyDiagnosticAtCurrentVersion asserts that there is a diagnostic report for
+// the current edited version of the buffer corresponding to the given
+// workspace-relative pathname.
+func (e *Env) AnyDiagnosticAtCurrentVersion(name string) DiagnosticExpectation {
+	version := e.E.BufferVersion(name)
+	isMet := func(diags *protocol.PublishDiagnosticsParams) bool {
+		return int(diags.Version) == version
+	}
+	return DiagnosticExpectation{
+		IsMet:       isMet,
+		Description: fmt.Sprintf("any diagnostics at version %d", version),
+		Path:        name,
+	}
+}
+
+// DiagnosticAtRegexp expects that there is a diagnostic entry at the start
+// position matching the regexp search string re in the buffer specified by
+// name. Note that this currently ignores the end position.
+func (e *Env) DiagnosticAtRegexp(name, re string) DiagnosticExpectation {
+	pos := e.RegexpSearch(name, re)
+	expectation := DiagnosticAt(name, pos.Line, pos.Column)
+	expectation.Description += fmt.Sprintf(" (location of %q)", re)
+	return expectation
 }
 
 // DiagnosticAt asserts that there is a diagnostic entry at the position
 // specified by line and col, for the workspace-relative path name.
 func DiagnosticAt(name string, line, col int) DiagnosticExpectation {
-	isMet := func(diags map[string]*protocol.PublishDiagnosticsParams) bool {
-		ds, ok := diags[name]
-		if !ok || len(ds.Diagnostics) == 0 {
-			return false
-		}
-		for _, d := range ds.Diagnostics {
+	isMet := func(diags *protocol.PublishDiagnosticsParams) bool {
+		for _, d := range diags.Diagnostics {
 			if d.Range.Start.Line == float64(line) && d.Range.Start.Character == float64(col) {
 				return true
 			}
@@ -341,55 +407,63 @@ func DiagnosticAt(name string, line, col int) DiagnosticExpectation {
 	}
 	return DiagnosticExpectation{
 		IsMet:       isMet,
-		Description: fmt.Sprintf("diagnostic in %q at (line:%d, column:%d)", name, line, col),
+		Description: fmt.Sprintf("diagnostic at {line:%d, column:%d}", line, col),
+		Path:        name,
 	}
 }
 
-// Await waits for all diagnostic expectations to simultaneously be met.
+// Await waits for all diagnostic expectations to simultaneously be met. It
+// should only be called from the main test goroutine.
 func (e *Env) Await(expectations ...DiagnosticExpectation) {
 	// NOTE: in the future this mechanism extend beyond just diagnostics, for
 	// example by modifying IsMet to be a func(*Env) boo.  However, that would
 	// require careful checking of conditions around every state change, so for
 	// now we just limit the scope to diagnostic conditions.
 
-	e.t.Helper()
+	e.T.Helper()
 	e.mu.Lock()
-	// Before adding the waiter, we check if the condition is currently met to
-	// avoid a race where the condition was realized before Await was called.
-	if meetsCondition(e.lastDiagnostics, expectations) {
+	// Before adding the waiter, we check if the condition is currently met or
+	// failed to avoid a race where the condition was realized before Await was
+	// called.
+	if meetsExpectations(e.lastDiagnostics, expectations) {
 		e.mu.Unlock()
 		return
 	}
-	met := make(chan struct{})
-	e.waiters[e.nextWaiterID] = &diagnosticCondition{
+	cond := &diagnosticCondition{
 		expectations: expectations,
-		met:          met,
+		met:          make(chan struct{}),
 	}
+	e.waiters[e.nextWaiterID] = cond
 	e.nextWaiterID++
 	e.mu.Unlock()
 
 	select {
-	case <-e.ctx.Done():
+	case <-e.Ctx.Done():
 		// Debugging an unmet expectation can be tricky, so we put some effort into
 		// nicely formatting the failure.
-		var descs []string
-		for _, e := range expectations {
-			descs = append(descs, e.Description)
-		}
+		summary := summarizeExpectations(expectations)
 		e.mu.Lock()
 		diagString := formatDiagnostics(e.lastDiagnostics)
 		e.mu.Unlock()
-		e.t.Fatalf("waiting on (%s):\nerr:%v\ndiagnostics:\n%s", strings.Join(descs, ", "), e.ctx.Err(), diagString)
-	case <-met:
+		e.T.Fatalf("waiting on:\n\t%s\nerr: %v\ndiagnostics:\n%s", summary, e.Ctx.Err(), diagString)
+	case <-cond.met:
 	}
+}
+
+func summarizeExpectations(expectations []DiagnosticExpectation) string {
+	var descs []string
+	for _, e := range expectations {
+		descs = append(descs, fmt.Sprintf("%s: %s", e.Path, e.Description))
+	}
+	return strings.Join(descs, "\n\t")
 }
 
 func formatDiagnostics(diags map[string]*protocol.PublishDiagnosticsParams) string {
 	var b strings.Builder
 	for name, params := range diags {
-		b.WriteString(name + ":\n")
+		b.WriteString(fmt.Sprintf("\t%s (version %d):\n", name, int(params.Version)))
 		for _, d := range params.Diagnostics {
-			b.WriteString(fmt.Sprintf("\t(%d, %d): %s\n", int(d.Range.Start.Line), int(d.Range.Start.Character), d.Message))
+			b.WriteString(fmt.Sprintf("\t\t(%d, %d): %s\n", int(d.Range.Start.Line), int(d.Range.Start.Character), d.Message))
 		}
 	}
 	return b.String()

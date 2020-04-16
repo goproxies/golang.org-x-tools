@@ -184,6 +184,7 @@ func (app *Application) featureCommands() []tool.Application {
 		&signature{app: app},
 		&suggestedfix{app: app},
 		&symbols{app: app},
+		&workspaceSymbol{app: app},
 	}
 }
 
@@ -232,11 +233,18 @@ func (app *Application) connectRemote(ctx context.Context, remote string) (*conn
 	stream := jsonrpc2.NewHeaderStream(conn, conn)
 	cc := jsonrpc2.NewConn(stream)
 	connection.Server = protocol.ServerDispatcher(cc)
-	cc.AddHandler(protocol.ClientHandler(connection.Client))
-	cc.AddHandler(protocol.Canceller{})
 	ctx = protocol.WithClient(ctx, connection.Client)
-	go cc.Run(ctx)
+	go cc.Run(ctx,
+		protocol.Handlers(
+			protocol.ClientHandler(connection.Client,
+				jsonrpc2.MethodNotFound)))
 	return connection, connection.initialize(ctx, app.options)
+}
+
+var matcherString = map[source.Matcher]string{
+	source.Fuzzy:           "fuzzy",
+	source.CaseSensitive:   "caseSensitive",
+	source.CaseInsensitive: "default",
 }
 
 func (c *connection) initialize(ctx context.Context, options func(*source.Options)) error {
@@ -253,7 +261,9 @@ func (c *connection) initialize(ctx context.Context, options func(*source.Option
 		ContentFormat: []protocol.MarkupKind{opts.PreferredContentFormat},
 	}
 	params.Capabilities.TextDocument.DocumentSymbol.HierarchicalDocumentSymbolSupport = opts.HierarchicalDocumentSymbolSupport
-
+	params.InitializationOptions = map[string]interface{}{
+		"matcher": matcherString[opts.Matcher],
+	}
 	if _, err := c.Server.Initialize(ctx, params); err != nil {
 		return err
 	}
@@ -364,8 +374,13 @@ func (c *cmdClient) Configuration(ctx context.Context, p *protocol.ParamConfigur
 			env[l[0]] = l[1]
 		}
 		results[i] = map[string]interface{}{
-			"env":     env,
-			"go-diff": true,
+			"env": env,
+			"analyses": map[string]bool{
+				"fillreturns":    true,
+				"nonewvars":      true,
+				"noresultvalues": true,
+				"undeclaredname": true,
+			},
 		}
 	}
 	return results, nil

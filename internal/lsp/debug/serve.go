@@ -31,13 +31,11 @@ import (
 	"golang.org/x/tools/internal/span"
 	"golang.org/x/tools/internal/telemetry/event"
 	"golang.org/x/tools/internal/telemetry/export"
+	"golang.org/x/tools/internal/telemetry/export/metric"
 	"golang.org/x/tools/internal/telemetry/export/ocagent"
 	"golang.org/x/tools/internal/telemetry/export/prometheus"
+	"golang.org/x/xerrors"
 )
-
-type exporter struct {
-	stderr io.Writer
-}
 
 type instanceKeyType int
 
@@ -54,6 +52,8 @@ type Instance struct {
 	OCAgentConfig        string
 
 	LogWriter io.Writer
+
+	exporter event.Exporter
 
 	ocagent    *ocagent.Exporter
 	prometheus *prometheus.Exporter
@@ -374,7 +374,7 @@ func (i *Instance) getFile(r *http.Request) interface{} {
 
 func (i *Instance) getInfo(r *http.Request) interface{} {
 	buf := &bytes.Buffer{}
-	i.PrintServerInfo(buf)
+	i.PrintServerInfo(r.Context(), buf)
 	return template.HTML(buf.String())
 }
 
@@ -385,9 +385,7 @@ func getMemory(r *http.Request) interface{} {
 }
 
 func init() {
-	event.SetExporter(&exporter{
-		stderr: os.Stderr,
-	})
+	event.SetExporter(makeGlobalExporter(os.Stderr))
 }
 
 func GetInstance(ctx context.Context) *Instance {
@@ -418,6 +416,7 @@ func WithInstance(ctx context.Context, workdir, agent string) context.Context {
 	i.rpcs = &rpcs{}
 	i.traces = &traces{}
 	i.State = &State{}
+	i.exporter = makeInstanceExporter(i)
 	return context.WithValue(ctx, instanceKey, i)
 }
 
@@ -542,40 +541,50 @@ func (i *Instance) writeMemoryDebug(threshold uint64) error {
 	return nil
 }
 
-func (e *exporter) ProcessEvent(ctx context.Context, ev event.Event) (context.Context, event.Event) {
-	ctx, ev = export.ContextSpan(ctx, ev)
-	i := GetInstance(ctx)
-	if ev.IsLog() && (ev.Error != nil || i == nil) {
-		fmt.Fprintf(e.stderr, "%v\n", ev)
+func makeGlobalExporter(stderr io.Writer) event.Exporter {
+	return func(ctx context.Context, ev event.Event, tags event.TagMap) context.Context {
+		i := GetInstance(ctx)
+
+		if ev.IsLog() {
+			// Don't log context cancellation errors.
+			if err := event.Err.Get(ev); xerrors.Is(err, context.Canceled) {
+				return ctx
+			}
+			// Make sure any log messages without an instance go to stderr.
+			if i == nil {
+				fmt.Fprintf(stderr, "%v\n", ev)
+			}
+		}
+		ctx = protocol.LogEvent(ctx, ev, tags)
+		if i == nil {
+			return ctx
+		}
+		return i.exporter(ctx, ev, tags)
 	}
-	ctx, ev = protocol.LogEvent(ctx, ev)
-	if i == nil {
-		return ctx, ev
-	}
-	ctx, ev = export.Tag(ctx, ev)
-	if i.ocagent != nil {
-		ctx, ev = i.ocagent.ProcessEvent(ctx, ev)
-	}
-	if i.traces != nil {
-		ctx, ev = i.traces.ProcessEvent(ctx, ev)
-	}
-	return ctx, ev
 }
 
-func (e *exporter) Metric(ctx context.Context, data event.MetricData) {
-	i := GetInstance(ctx)
-	if i == nil {
-		return
+func makeInstanceExporter(i *Instance) event.Exporter {
+	exporter := func(ctx context.Context, ev event.Event, tags event.TagMap) context.Context {
+		if i.ocagent != nil {
+			ctx = i.ocagent.ProcessEvent(ctx, ev, tags)
+		}
+		if i.prometheus != nil {
+			ctx = i.prometheus.ProcessEvent(ctx, ev, tags)
+		}
+		if i.rpcs != nil {
+			ctx = i.rpcs.ProcessEvent(ctx, ev, tags)
+		}
+		if i.traces != nil {
+			ctx = i.traces.ProcessEvent(ctx, ev, tags)
+		}
+		return ctx
 	}
-	if i.ocagent != nil {
-		i.ocagent.Metric(ctx, data)
-	}
-	if i.traces != nil {
-		i.prometheus.Metric(ctx, data)
-	}
-	if i.rpcs != nil {
-		i.rpcs.Metric(ctx, data)
-	}
+	metrics := metric.Config{}
+	registerMetrics(&metrics)
+	exporter = metrics.Exporter(exporter)
+	exporter = export.Spans(exporter)
+	exporter = export.Labels(exporter)
+	return exporter
 }
 
 type dataFunc func(*http.Request) interface{}

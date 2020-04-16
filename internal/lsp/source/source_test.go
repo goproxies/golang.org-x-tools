@@ -51,10 +51,14 @@ func testSource(t *testing.T, exporter packagestest.Exporter) {
 		session := cache.NewSession(ctx)
 		options := tests.DefaultOptions()
 		options.Env = datum.Config.Env
-		view, _, err := session.NewView(ctx, "source_test", span.URIFromPath(datum.Config.Dir), options)
+		view, snapshot, err := session.NewView(ctx, "source_test", span.URIFromPath(datum.Config.Dir), options)
 		if err != nil {
 			t.Fatal(err)
 		}
+		// Enable type error analyses for tests.
+		// TODO(golang/go#38212): Delete this once they are enabled by default.
+		tests.EnableAllAnalyzers(snapshot, &options)
+		view.SetOptions(ctx, options)
 		r := &runner{
 			view: view,
 			data: datum,
@@ -77,14 +81,14 @@ func testSource(t *testing.T, exporter packagestest.Exporter) {
 		if _, err := session.DidModifyFiles(ctx, modifications); err != nil {
 			t.Fatal(err)
 		}
-		t.Run(datum.Folder, func(t *testing.T) {
+		t.Run(tests.FormatFolderName(datum.Folder), func(t *testing.T) {
 			t.Helper()
 			tests.Run(t, r, datum)
 		})
 	}
 }
 
-func (r *runner) Diagnostics(t *testing.T, uri span.URI, want []source.Diagnostic) {
+func (r *runner) Diagnostics(t *testing.T, uri span.URI, want []*source.Diagnostic) {
 	snapshot := r.view.Snapshot()
 
 	fileID, got, err := source.FileDiagnostics(r.ctx, snapshot, uri)
@@ -129,6 +133,7 @@ func (r *runner) CompletionSnippet(t *testing.T, src span.Span, expected tests.C
 	_, list := r.callCompletion(t, src, func(opts *source.Options) {
 		opts.Placeholders = placeholders
 		opts.DeepCompletion = true
+		opts.UnimportedCompletion = false
 	})
 	got := tests.FindItem(list, *items[expected.CompletionItem])
 	want := expected.PlainSnippet

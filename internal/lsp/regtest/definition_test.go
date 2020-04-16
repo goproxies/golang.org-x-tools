@@ -5,16 +5,13 @@
 package regtest
 
 import (
-	"context"
 	"path"
 	"testing"
-
-	"golang.org/x/tools/internal/lsp/fake"
 )
 
 const internalDefinition = `
 -- go.mod --
-module mod
+module mod.com
 
 go 1.12
 -- main.go --
@@ -32,13 +29,13 @@ const message = "Hello World."
 `
 
 func TestGoToInternalDefinition(t *testing.T) {
-	runner.Run(t, internalDefinition, func(ctx context.Context, t *testing.T, env *Env) {
+	runner.Run(t, internalDefinition, func(t *testing.T, env *Env) {
 		env.OpenFile("main.go")
-		name, pos := env.GoToDefinition("main.go", fake.Pos{Line: 5, Column: 13})
+		name, pos := env.GoToDefinition("main.go", env.RegexpSearch("main.go", "message"))
 		if want := "const.go"; name != want {
 			t.Errorf("GoToDefinition: got file %q, want %q", name, want)
 		}
-		if want := (fake.Pos{Line: 2, Column: 6}); pos != want {
+		if want := env.RegexpSearch("const.go", "message"); pos != want {
 			t.Errorf("GoToDefinition: got position %v, want %v", pos, want)
 		}
 	})
@@ -46,7 +43,7 @@ func TestGoToInternalDefinition(t *testing.T) {
 
 const stdlibDefinition = `
 -- go.mod --
-module mod
+module mod.com
 
 go 1.12
 -- main.go --
@@ -61,10 +58,10 @@ func main() {
 	fmt.Println(time.Now())
 }`
 
-func TestGoToStdlibDefinition(t *testing.T) {
-	runner.Run(t, stdlibDefinition, func(ctx context.Context, t *testing.T, env *Env) {
+func TestGoToStdlibDefinition_Issue37045(t *testing.T) {
+	runner.Run(t, stdlibDefinition, func(t *testing.T, env *Env) {
 		env.OpenFile("main.go")
-		name, pos := env.GoToDefinition("main.go", fake.Pos{Line: 8, Column: 19})
+		name, pos := env.GoToDefinition("main.go", env.RegexpSearch("main.go", "Now"))
 		if got, want := path.Base(name), "time.go"; got != want {
 			t.Errorf("GoToDefinition: got file %q, want %q", name, want)
 		}

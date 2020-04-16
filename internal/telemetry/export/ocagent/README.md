@@ -1,6 +1,7 @@
-# Exporting Metrics with OpenCensus and Prometheus
+# Exporting Metrics and Traces with OpenCensus, Zipkin, and Prometheus
 
-This tutorial provides a minimum example to verify that metrics can be exported to OpenCensus from Go tools.
+This tutorial provides a minimum example to verify that metrics and traces
+can be exported to OpenCensus from Go tools.
 
 ## Setting up oragent
 
@@ -23,7 +24,7 @@ Starting oragent_prometheus_1 ... done
 4. To shut down oragent, hit Ctrl+C in the terminal.
 5. You can also start oragent in detached mode by running `docker-compose up -d`. To stop oragent while detached, run `docker-compose down`.
 
-## Exporting Metrics
+## Exporting Metrics and Traces
 1. Clone the [tools](https://golang.org/x/tools) subrepository.
 1. Inside `internal`, create a file named `main.go` with the following contents:
 ```go
@@ -36,25 +37,39 @@ import (
 	"net/http"
 	"time"
 
+	"golang.org/x/tools/internal/telemetry/event"
 	"golang.org/x/tools/internal/telemetry/export"
+	"golang.org/x/tools/internal/telemetry/export/metric"
 	"golang.org/x/tools/internal/telemetry/export/ocagent"
-	"golang.org/x/tools/internal/telemetry/metric"
-	"golang.org/x/tools/internal/telemetry/stats"
 )
 
-func main() {
+type testExporter struct {
+	metrics metric.Exporter
+	ocagent *ocagent.Exporter
+}
 
-	exporter := ocagent.Connect(&ocagent.Config{
+func (e *testExporter) ProcessEvent(ctx context.Context, ev event.Event) (context.Context, event.Event) {
+	ctx, ev = export.Tag(ctx, ev)
+	ctx, ev = export.ContextSpan(ctx, ev)
+	ctx, ev = e.metrics.ProcessEvent(ctx, ev)
+	ctx, ev = e.ocagent.ProcessEvent(ctx, ev)
+	return ctx, ev
+}
+
+func main() {
+	exporter := &testExporter{}
+
+	exporter.ocagent = ocagent.Connect(&ocagent.Config{
 		Start:   time.Now(),
 		Address: "http://127.0.0.1:55678",
 		Service: "go-tools-test",
 		Rate:    5 * time.Second,
 		Client:  &http.Client{},
 	})
-	export.SetExporter(exporter)
+	event.SetExporter(exporter)
 
 	ctx := context.TODO()
-	mLatency := stats.Float64("latency", "the latency in milliseconds", "ms")
+	mLatency := event.NewFloat64Key("latency", "the latency in milliseconds")
 	distribution := metric.HistogramFloat64Data{
 		Info: &metric.HistogramFloat64{
 			Name:        "latencyDistribution",
@@ -63,12 +78,14 @@ func main() {
 		},
 	}
 
-	distribution.Info.Record(mLatency)
+	distribution.Info.Record(&exporter.metrics, mLatency)
 
 	for {
 		sleep := randomSleep()
+		_, end := event.StartSpan(ctx, "main.randomSleep()")
 		time.Sleep(time.Duration(sleep) * time.Millisecond)
-		mLatency.Record(ctx, float64(sleep))
+		end()
+		event.Record(ctx, mLatency.Of(float64(sleep)))
 
 		fmt.Println("Latency: ", float64(sleep))
 	}
@@ -118,3 +135,5 @@ promdemo_latencyDistribution_sum{vendor="otc"} 1641
 promdemo_latencyDistribution_count{vendor="otc"} 15
 ```
 5. After a few more seconds, Prometheus should start displaying your new metrics. You can view the distribution at http://localhost:9445/graph?g0.range_input=5m&g0.stacked=1&g0.expr=rate(oragent_latencyDistribution_bucket%5B5m%5D)&g0.tab=0.
+
+6. Zipkin should also start displaying traces. You can view them at http://localhost:9444/zipkin/?limit=10&lookback=300000&serviceName=go-tools-test.

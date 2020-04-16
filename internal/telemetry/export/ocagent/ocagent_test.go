@@ -17,8 +17,8 @@ import (
 
 	"golang.org/x/tools/internal/telemetry/event"
 	"golang.org/x/tools/internal/telemetry/export"
+	"golang.org/x/tools/internal/telemetry/export/metric"
 	"golang.org/x/tools/internal/telemetry/export/ocagent"
-	"golang.org/x/tools/internal/telemetry/metric"
 )
 
 const testNodeStr = `{
@@ -39,9 +39,9 @@ const testNodeStr = `{
 	},`
 
 var (
-	keyDB    = event.NewStringKey("db", "the database name")
-	keyHello = event.NewStringKey("hello", "a metric grouping key")
-	keyWorld = event.NewStringKey("world", "another metric grouping key")
+	keyDB     = event.NewStringKey("db", "the database name")
+	keyMethod = event.NewStringKey("method", "a metric grouping key")
+	keyRoute  = event.NewStringKey("route", "another metric grouping key")
 
 	key1DB = event.NewStringKey("1_db", "A test string key")
 
@@ -63,14 +63,35 @@ var (
 	key5cPort    = event.NewUInt16Key("5c_port", "A test uint16 key")
 	key5dMinHops = event.NewUInt32Key("5d_min_hops", "A test uint32 key")
 	key5eMaxHops = event.NewUInt64Key("5e_max_hops", "A test uint64 key")
+
+	recursiveCalls = event.NewInt64Key("recursive_calls", "Number of recursive calls")
+	bytesIn        = event.NewInt64Key("bytes_in", "Number of bytes in")           //, unit.Bytes)
+	latencyMs      = event.NewFloat64Key("latency", "The latency in milliseconds") //, unit.Milliseconds)
+
+	metricLatency = metric.HistogramFloat64{
+		Name:        "latency_ms",
+		Description: "The latency of calls in milliseconds",
+		Keys:        []event.Key{keyMethod, keyRoute},
+		Buckets:     []float64{0, 5, 10, 25, 50},
+	}
+
+	metricBytesIn = metric.HistogramInt64{
+		Name:        "latency_ms",
+		Description: "The latency of calls in milliseconds",
+		Keys:        []event.Key{keyMethod, keyRoute},
+		Buckets:     []int64{0, 10, 50, 100, 500, 1000, 2000},
+	}
+
+	metricRecursiveCalls = metric.Scalar{
+		Name:        "latency_ms",
+		Description: "The latency of calls in milliseconds",
+		Keys:        []event.Key{keyMethod, keyRoute},
+	}
 )
 
 type testExporter struct {
 	ocagent *ocagent.Exporter
 	sent    fakeSender
-	start   time.Time
-	at      time.Time
-	end     time.Time
 }
 
 func registerExporter() *testExporter {
@@ -83,38 +104,47 @@ func registerExporter() *testExporter {
 	}
 	cfg.Start, _ = time.Parse(time.RFC3339Nano, "1970-01-01T00:00:00Z")
 	exporter.ocagent = ocagent.Connect(&cfg)
-	exporter.start, _ = time.Parse(time.RFC3339Nano, "1970-01-01T00:00:30Z")
-	exporter.at, _ = time.Parse(time.RFC3339Nano, "1970-01-01T00:00:40Z")
-	exporter.end, _ = time.Parse(time.RFC3339Nano, "1970-01-01T00:00:50Z")
-	event.SetExporter(exporter)
+
+	metrics := metric.Config{}
+	metricLatency.Record(&metrics, latencyMs)
+	metricBytesIn.Record(&metrics, bytesIn)
+	metricRecursiveCalls.SumInt64(&metrics, recursiveCalls)
+
+	e := exporter.ocagent.ProcessEvent
+	e = metrics.Exporter(e)
+	e = spanFixer(e)
+	e = export.Spans(e)
+	e = export.Labels(e)
+	e = timeFixer(e)
+	event.SetExporter(e)
 	return exporter
 }
 
-func (e *testExporter) ProcessEvent(ctx context.Context, ev event.Event) (context.Context, event.Event) {
-	switch {
-	case ev.IsStartSpan():
-		ev.At = e.start
-	case ev.IsEndSpan():
-		ev.At = e.end
-	default:
-		ev.At = e.at
+func timeFixer(output event.Exporter) event.Exporter {
+	start, _ := time.Parse(time.RFC3339Nano, "1970-01-01T00:00:30Z")
+	at, _ := time.Parse(time.RFC3339Nano, "1970-01-01T00:00:40Z")
+	end, _ := time.Parse(time.RFC3339Nano, "1970-01-01T00:00:50Z")
+	return func(ctx context.Context, ev event.Event, tagMap event.TagMap) context.Context {
+		switch {
+		case ev.IsStartSpan():
+			ev.At = start
+		case ev.IsEndSpan():
+			ev.At = end
+		default:
+			ev.At = at
+		}
+		return output(ctx, ev, tagMap)
 	}
-	ctx, ev = export.Tag(ctx, ev)
-	ctx, ev = export.ContextSpan(ctx, ev)
-	ctx, ev = e.ocagent.ProcessEvent(ctx, ev)
-	if ev.IsStartSpan() {
-		span := export.GetSpan(ctx)
-		span.ID = export.SpanContext{}
-	}
-	return ctx, ev
 }
 
-func (e *testExporter) Metric(ctx context.Context, data event.MetricData) {
-	switch data := data.(type) {
-	case *metric.Int64Data:
-		data.EndTime = &e.start
+func spanFixer(output event.Exporter) event.Exporter {
+	return func(ctx context.Context, ev event.Event, tagMap event.TagMap) context.Context {
+		if ev.IsStartSpan() {
+			span := export.GetSpan(ctx)
+			span.ID = export.SpanContext{}
+		}
+		return output(ctx, ev, tagMap)
 	}
-	e.ocagent.Metric(ctx, data)
 }
 
 func (e *testExporter) Output(route string) []byte {

@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"golang.org/x/tools/internal/lsp/fake"
+	"golang.org/x/tools/internal/lsp/protocol"
 )
 
 // Use mod.com for all go.mod files due to golang/go#35230.
@@ -31,7 +32,14 @@ func TestDiagnosticErrorInEditedFile(t *testing.T) {
 		// diagnostic.
 		env.OpenFile("main.go")
 		env.RegexpReplace("main.go", "Printl(n)", "")
-		env.Await(env.DiagnosticAtRegexp("main.go", "Printl"))
+		env.Await(
+			env.DiagnosticAtRegexp("main.go", "Printl"),
+			// Assert that this test has sent no error logs to the client. This is not
+			// strictly necessary for testing this regression, but is included here
+			// as an example of using the NoErrorLogs() expectation. Feel free to
+			// delete.
+			NoErrorLogs(),
+		)
 	})
 }
 
@@ -88,7 +96,10 @@ func TestDiagnosticClearingOnEdit(t *testing.T) {
 
 		// Fix the error by editing the const name in b.go to `b`.
 		env.RegexpReplace("b.go", "(a) = 2", "b")
-		env.Await(EmptyDiagnostics("a.go"), EmptyDiagnostics("b.go"))
+		env.Await(
+			EmptyDiagnostics("a.go"),
+			EmptyDiagnostics("b.go"),
+		)
 	})
 }
 
@@ -257,5 +268,56 @@ func TestPackageChange(t *testing.T) {
 		env.RegexpReplace("a.go", "foo", "foox")
 		// TODO: there should be no error
 		env.Await(EmptyDiagnostics("a.go"))
+	})
+}
+
+const testPackageWithRequire = `
+-- go.mod --
+module mod.com
+
+go 1.12
+
+require (
+	foo.test v1.2.3
+)
+-- print.go --
+package lib
+
+import (
+	"fmt"
+
+	"foo.test/bar"
+)
+
+func PrintAnswer() {
+	fmt.Printf("answer: %s", bar.Answer)
+}
+`
+
+const testPackageWithRequireProxy = `
+-- foo.test@v1.2.3/go.mod --
+module foo.test
+
+go 1.12
+-- foo.test@v1.2.3/bar/const.go --
+package bar
+
+const Answer = 42
+`
+
+func TestResolveDiagnosticWithDownload(t *testing.T) {
+	runner.Run(t, testPackageWithRequire, func(t *testing.T, env *Env) {
+		env.OpenFile("print.go")
+		// Check that gopackages correctly loaded this dependency. We should get a
+		// diagnostic for the wrong formatting type.
+		// TODO: we should be able to easily also match the diagnostic message.
+		env.Await(env.DiagnosticAtRegexp("print.go", "fmt.Printf"))
+	}, WithProxy(testPackageWithRequireProxy))
+}
+
+func TestMissingDependency(t *testing.T) {
+	runner.Run(t, testPackageWithRequire, func(t *testing.T, env *Env) {
+		env.OpenFile("print.go")
+		env.Await(LogMatching(protocol.Error, "initial workspace load failed"))
 	})
 }

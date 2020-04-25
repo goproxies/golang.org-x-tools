@@ -161,6 +161,7 @@ type runConfig struct {
 	modes    EnvMode
 	proxyTxt string
 	timeout  time.Duration
+	env      []string
 }
 
 func (r *Runner) defaultConfig() *runConfig {
@@ -202,6 +203,12 @@ func WithModes(modes EnvMode) RunOption {
 	})
 }
 
+func WithEnv(env ...string) RunOption {
+	return optionSetter(func(opts *runConfig) {
+		opts.env = env
+	})
+}
+
 // Run executes the test function in the default configured gopls execution
 // modes. For each a test run, a new workspace is created containing the
 // un-txtared files specified by filedata.
@@ -233,7 +240,7 @@ func (r *Runner) Run(t *testing.T, filedata string, test func(t *testing.T, e *E
 			defer cancel()
 			ctx = debug.WithInstance(ctx, "", "")
 
-			ws, err := fake.NewWorkspace("regtest", filedata, config.proxyTxt)
+			ws, err := fake.NewWorkspace("regtest", filedata, config.proxyTxt, config.env...)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -339,6 +346,15 @@ type State struct {
 	// diagnostics are a map of relative path->diagnostics params
 	diagnostics map[string]*protocol.PublishDiagnosticsParams
 	logs        []*protocol.LogMessageParams
+	// outstandingWork is a map of token->work summary. All tokens are assumed to
+	// be string, though the spec allows for numeric tokens as well.  When work
+	// completes, it is deleted from this map.
+	outstandingWork map[string]*workProgress
+}
+
+type workProgress struct {
+	title   string
+	percent float64
 }
 
 func (s State) String() string {
@@ -360,6 +376,15 @@ func (s State) String() string {
 		for _, d := range params.Diagnostics {
 			fmt.Fprintf(&b, "\t\t(%d, %d): %s\n", int(d.Range.Start.Line), int(d.Range.Start.Character), d.Message)
 		}
+	}
+	b.WriteString("\n")
+	b.WriteString("#### outstanding work:\n")
+	for token, state := range s.outstandingWork {
+		name := state.title
+		if name == "" {
+			name = fmt.Sprintf("!NO NAME(token: %s)", token)
+		}
+		fmt.Fprintf(&b, "\t%s: %.2f", name, state.percent)
 	}
 	return b.String()
 }
@@ -389,12 +414,15 @@ func NewEnv(ctx context.Context, t *testing.T, ws *fake.Workspace, ts servertest
 		Server: ts,
 		Conn:   conn,
 		state: State{
-			diagnostics: make(map[string]*protocol.PublishDiagnosticsParams),
+			diagnostics:     make(map[string]*protocol.PublishDiagnosticsParams),
+			outstandingWork: make(map[string]*workProgress),
 		},
 		waiters: make(map[int]*condition),
 	}
 	env.E.Client().OnDiagnostics(env.onDiagnostics)
 	env.E.Client().OnLogMessage(env.onLogMessage)
+	env.E.Client().OnWorkDoneProgressCreate(env.onWorkDoneProgressCreate)
+	env.E.Client().OnProgress(env.onProgress)
 	return env
 }
 
@@ -416,9 +444,41 @@ func (e *Env) onLogMessage(_ context.Context, m *protocol.LogMessageParams) erro
 	return nil
 }
 
+func (e *Env) onWorkDoneProgressCreate(_ context.Context, m *protocol.WorkDoneProgressCreateParams) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	// panic if we don't have a string token.
+	token := m.Token.(string)
+	e.state.outstandingWork[token] = &workProgress{}
+	return nil
+}
+
+func (e *Env) onProgress(_ context.Context, m *protocol.ProgressParams) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	token := m.Token.(string)
+	work, ok := e.state.outstandingWork[token]
+	if !ok {
+		panic(fmt.Sprintf("got progress report for unknown report %s", token))
+	}
+	v := m.Value.(map[string]interface{})
+	switch kind := v["kind"]; kind {
+	case "begin":
+		work.title = v["title"].(string)
+	case "report":
+		if pct, ok := v["percentage"]; ok {
+			work.percent = pct.(float64)
+		}
+	case "end":
+		delete(e.state.outstandingWork, token)
+	}
+	e.checkConditionsLocked()
+	return nil
+}
+
 func (e *Env) checkConditionsLocked() {
 	for id, condition := range e.waiters {
-		if v, _ := checkExpectations(e.state, condition.expectations); v != Unmet {
+		if v, _, _ := checkExpectations(e.state, condition.expectations); v != Unmet {
 			delete(e.waiters, id)
 			condition.verdict <- v
 		}
@@ -442,23 +502,27 @@ func (e *Env) ExpectNow(expectations ...Expectation) {
 	e.T.Helper()
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if verdict, summary := checkExpectations(e.state, expectations); verdict != Met {
+	if verdict, summary, _ := checkExpectations(e.state, expectations); verdict != Met {
 		e.T.Fatalf("expectations unmet:\n%s\ncurrent state:\n%v", summary, e.state)
 	}
 }
 
 // checkExpectations reports whether s meets all expectations.
-func checkExpectations(s State, expectations []Expectation) (Verdict, string) {
+func checkExpectations(s State, expectations []Expectation) (Verdict, string, []interface{}) {
 	finalVerdict := Met
+	var metBy []interface{}
 	var summary strings.Builder
 	for _, e := range expectations {
-		v := e.Check(s)
+		v, mb := e.Check(s)
+		if v == Met {
+			metBy = append(metBy, mb)
+		}
 		if v > finalVerdict {
 			finalVerdict = v
 		}
 		summary.WriteString(fmt.Sprintf("\t%v: %s\n", v, e.Description()))
 	}
-	return finalVerdict, summary.String()
+	return finalVerdict, summary.String(), metBy
 }
 
 // An Expectation asserts that the state of the editor at a point in time
@@ -466,8 +530,8 @@ func checkExpectations(s State, expectations []Expectation) (Verdict, string) {
 // certain conditions in the editor are met.
 type Expectation interface {
 	// Check determines whether the state of the editor satisfies the
-	// expectation.
-	Check(State) Verdict
+	// expectation, returning the results that met the condition.
+	Check(State) (Verdict, interface{})
 	// Description is a human-readable description of the expectation.
 	Description() string
 }
@@ -501,15 +565,46 @@ func (v Verdict) String() string {
 	return fmt.Sprintf("unrecognized verdict %d", v)
 }
 
+// SimpleExpectation holds an arbitrary check func, and implements the Expectation interface.
+type SimpleExpectation struct {
+	check       func(State) Verdict
+	description string
+}
+
+// Check invokes e.check.
+func (e SimpleExpectation) Check(s State) Verdict {
+	return e.check(s)
+}
+
+// Description returns e.descriptin.
+func (e SimpleExpectation) Description() string {
+	return e.description
+}
+
+// NoOutstandingWork asserts that there is no work initiated using the LSP
+// $/progress API that has not completed.
+func NoOutstandingWork() SimpleExpectation {
+	check := func(s State) Verdict {
+		if len(s.outstandingWork) == 0 {
+			return Met
+		}
+		return Unmet
+	}
+	return SimpleExpectation{
+		check:       check,
+		description: "no outstanding work",
+	}
+}
+
 // LogExpectation is an expectation on the log messages received by the editor
 // from gopls.
 type LogExpectation struct {
-	check       func([]*protocol.LogMessageParams) Verdict
+	check       func([]*protocol.LogMessageParams) (Verdict, interface{})
 	description string
 }
 
 // Check implements the Expectation interface.
-func (e LogExpectation) Check(s State) Verdict {
+func (e LogExpectation) Check(s State) (Verdict, interface{}) {
 	return e.check(s.logs)
 }
 
@@ -521,13 +616,13 @@ func (e LogExpectation) Description() string {
 // NoErrorLogs asserts that the client has not received any log messages of
 // error severity.
 func NoErrorLogs() LogExpectation {
-	check := func(msgs []*protocol.LogMessageParams) Verdict {
+	check := func(msgs []*protocol.LogMessageParams) (Verdict, interface{}) {
 		for _, msg := range msgs {
 			if msg.Type == protocol.Error {
-				return Unmeetable
+				return Unmeetable, nil
 			}
 		}
-		return Met
+		return Met, nil
 	}
 	return LogExpectation{
 		check:       check,
@@ -542,13 +637,13 @@ func LogMatching(typ protocol.MessageType, re string) LogExpectation {
 	if err != nil {
 		panic(err)
 	}
-	check := func(msgs []*protocol.LogMessageParams) Verdict {
+	check := func(msgs []*protocol.LogMessageParams) (Verdict, interface{}) {
 		for _, msg := range msgs {
 			if msg.Type == typ && rec.Match([]byte(msg.Message)) {
-				return Met
+				return Met, msg
 			}
 		}
-		return Unmet
+		return Unmet, nil
 	}
 	return LogExpectation{
 		check:       check,
@@ -569,11 +664,11 @@ type DiagnosticExpectation struct {
 }
 
 // Check implements the Expectation interface.
-func (e DiagnosticExpectation) Check(s State) Verdict {
+func (e DiagnosticExpectation) Check(s State) (Verdict, interface{}) {
 	if diags, ok := s.diagnostics[e.path]; ok && e.isMet(diags) {
-		return Met
+		return Met, diags
 	}
-	return Unmet
+	return Unmet, nil
 }
 
 // Description implements the Expectation interface.
@@ -639,15 +734,15 @@ func DiagnosticAt(name string, line, col int) DiagnosticExpectation {
 
 // Await waits for all expectations to simultaneously be met. It should only be
 // called from the main test goroutine.
-func (e *Env) Await(expectations ...Expectation) {
+func (e *Env) Await(expectations ...Expectation) []interface{} {
 	e.T.Helper()
 	e.mu.Lock()
 	// Before adding the waiter, we check if the condition is currently met or
 	// failed to avoid a race where the condition was realized before Await was
 	// called.
-	switch verdict, summary := checkExpectations(e.state, expectations); verdict {
+	switch verdict, summary, metBy := checkExpectations(e.state, expectations); verdict {
 	case Met:
-		return
+		return metBy
 	case Unmeetable:
 		e.mu.Unlock()
 		e.T.Fatalf("unmeetable expectations:\n%s\nstate:\n%v", summary, e.state)
@@ -669,13 +764,14 @@ func (e *Env) Await(expectations ...Expectation) {
 			err = fmt.Errorf("condition has final verdict %v", v)
 		}
 	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	_, summary, metBy := checkExpectations(e.state, expectations)
 
+	// Debugging an unmet expectation can be tricky, so we put some effort into
+	// nicely formatting the failure.
 	if err != nil {
-		// Debugging an unmet expectation can be tricky, so we put some effort into
-		// nicely formatting the failure.
-		e.mu.Lock()
-		defer e.mu.Unlock()
-		_, summary := checkExpectations(e.state, expectations)
 		e.T.Fatalf("waiting on:\n%s\nerr:%v\nstate:\n%v", err, summary, e.state)
 	}
+	return metBy
 }

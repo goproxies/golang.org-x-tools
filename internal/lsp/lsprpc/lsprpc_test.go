@@ -11,13 +11,13 @@ import (
 	"testing"
 	"time"
 
+	"golang.org/x/tools/internal/event"
 	"golang.org/x/tools/internal/jsonrpc2"
 	"golang.org/x/tools/internal/jsonrpc2/servertest"
 	"golang.org/x/tools/internal/lsp/cache"
 	"golang.org/x/tools/internal/lsp/debug"
 	"golang.org/x/tools/internal/lsp/fake"
 	"golang.org/x/tools/internal/lsp/protocol"
-	"golang.org/x/tools/internal/telemetry/event"
 )
 
 type fakeClient struct {
@@ -34,7 +34,7 @@ func (c fakeClient) LogMessage(ctx context.Context, params *protocol.LogMessageP
 type pingServer struct{ protocol.Server }
 
 func (s pingServer) DidOpen(ctx context.Context, params *protocol.DidOpenTextDocumentParams) error {
-	event.Print(ctx, "ping")
+	event.Log(ctx, "ping")
 	return nil
 }
 

@@ -51,13 +51,21 @@ go 1.12
 `
 
 func TestMissingImportDiagsClearOnFirstFile(t *testing.T) {
-	t.Skip("skipping due to golang.org/issues/37195")
 	t.Parallel()
 	runner.Run(t, onlyMod, func(t *testing.T, env *Env) {
-		env.CreateBuffer("main.go", "package main\n\nfunc m() {\nlog.Println()\n}")
+		env.CreateBuffer("main.go", `package main
+
+func m() {
+	log.Println()
+}
+`)
+		env.Await(
+			env.DiagnosticAtRegexp("main.go", "log"),
+		)
 		env.SaveBuffer("main.go")
-		// TODO: this shouldn't actually happen
-		env.Await(env.DiagnosticAtRegexp("main.go", "Println"))
+		env.Await(
+			EmptyDiagnostics("main.go"),
+		)
 	})
 }
 
@@ -320,4 +328,37 @@ func TestMissingDependency(t *testing.T) {
 		env.OpenFile("print.go")
 		env.Await(LogMatching(protocol.Error, "initial workspace load failed"))
 	})
+}
+
+func TestAdHocPackagesIssue_36951(t *testing.T) {
+	const adHoc = `
+-- b/b.go --
+package b
+
+func Hello() {
+	var x int
+}
+`
+	runner.Run(t, adHoc, func(t *testing.T, env *Env) {
+		env.OpenFile("b/b.go")
+		env.Await(env.DiagnosticAtRegexp("b/b.go", "x"))
+	})
+}
+
+func TestNoGOPATHIssue_37984(t *testing.T) {
+	const missingImport = `
+-- main.go --
+package main
+
+func _() {
+	fmt.Println("Hello World")
+}
+`
+	runner.Run(t, missingImport, func(t *testing.T, env *Env) {
+		env.OpenFile("main.go")
+		env.Await(env.DiagnosticAtRegexp("main.go", "fmt"))
+		if err := env.E.OrganizeImports(env.Ctx, "main.go"); err == nil {
+			t.Fatalf("organize imports should fail with an empty GOPATH")
+		}
+	}, WithEnv("GOPATH="))
 }

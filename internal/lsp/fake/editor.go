@@ -110,7 +110,8 @@ func (e *Editor) configuration() map[string]interface{} {
 		env[kv[0]] = kv[1]
 	}
 	return map[string]interface{}{
-		"env": env,
+		"env":                     env,
+		"verboseWorkDoneProgress": true,
 	}
 }
 
@@ -120,7 +121,9 @@ func (e *Editor) initialize(ctx context.Context) error {
 	params.ClientInfo.Version = "v1.0.0"
 	params.RootURI = e.ws.RootURI()
 	params.Capabilities.Workspace.Configuration = true
+	params.Capabilities.Window.WorkDoneProgress = true
 	// TODO: set client capabilities
+	params.InitializationOptions = e.configuration()
 
 	params.Trace = "messages"
 	// TODO: support workspace folders.
@@ -494,12 +497,24 @@ func (e *Editor) GoToDefinition(ctx context.Context, path string, pos Pos) (stri
 
 // OrganizeImports requests and performs the source.organizeImports codeAction.
 func (e *Editor) OrganizeImports(ctx context.Context, path string) error {
+	return e.codeAction(ctx, path, nil, protocol.SourceOrganizeImports)
+}
+
+// ApplyQuickFixes requests and performs the quickfix codeAction.
+func (e *Editor) ApplyQuickFixes(ctx context.Context, path string, diagnostics []protocol.Diagnostic) error {
+	return e.codeAction(ctx, path, diagnostics, protocol.QuickFix)
+}
+
+func (e *Editor) codeAction(ctx context.Context, path string, diagnostics []protocol.Diagnostic, only protocol.CodeActionKind) error {
 	if e.server == nil {
 		return nil
 	}
 	params := &protocol.CodeActionParams{}
 	params.TextDocument.URI = e.ws.URI(path)
-
+	params.Context.Only = []protocol.CodeActionKind{only}
+	if diagnostics != nil {
+		params.Context.Diagnostics = diagnostics
+	}
 	actions, err := e.server.CodeAction(ctx, params)
 	if err != nil {
 		return fmt.Errorf("textDocument/codeAction: %v", err)
@@ -507,7 +522,7 @@ func (e *Editor) OrganizeImports(ctx context.Context, path string) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	for _, action := range actions {
-		if action.Kind == protocol.SourceOrganizeImports {
+		if action.Kind == only {
 			for _, change := range action.Edit.DocumentChanges {
 				path := e.ws.URIToPath(change.TextDocument.URI)
 				if float64(e.buffers[path].version) != change.TextDocument.Version {

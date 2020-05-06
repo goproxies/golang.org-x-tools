@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"golang.org/x/tools/internal/gocommand"
 	"golang.org/x/tools/internal/lsp/protocol"
@@ -38,6 +39,9 @@ type Workspace struct {
 
 	watcherMu sync.Mutex
 	watchers  []func(context.Context, []FileEvent)
+
+	fileMu sync.Mutex
+	files  map[string]time.Time
 }
 
 // NewWorkspace creates a named workspace populated by the txtar-encoded
@@ -56,27 +60,31 @@ func NewWorkspace(name, srctxt, proxytxt string, env ...string) (_ *Workspace, e
 	}()
 	dir, err := ioutil.TempDir("", fmt.Sprintf("goplstest-ws-%s-", name))
 	if err != nil {
-		return nil, fmt.Errorf("creating temporary workdir: %v", err)
+		return nil, fmt.Errorf("creating temporary workdir: %w", err)
 	}
 	w.workdir = dir
 	gopath, err := ioutil.TempDir("", fmt.Sprintf("goplstest-gopath-%s-", name))
 	if err != nil {
-		return nil, fmt.Errorf("creating temporary gopath: %v", err)
+		return nil, fmt.Errorf("creating temporary gopath: %w", err)
 	}
 	w.gopath = gopath
 	files := unpackTxt(srctxt)
 	for name, data := range files {
 		if err := w.writeFileData(name, string(data)); err != nil {
-			return nil, fmt.Errorf("writing to workdir: %v", err)
+			return nil, fmt.Errorf("writing to workdir: %w", err)
 		}
 	}
 	pd, err := ioutil.TempDir("", fmt.Sprintf("goplstest-proxy-%s-", name))
 	if err != nil {
-		return nil, fmt.Errorf("creating temporary proxy dir: %v", err)
+		return nil, fmt.Errorf("creating temporary proxy dir: %w", err)
 	}
 	w.proxydir = pd
 	if err := writeProxyDir(unpackTxt(proxytxt), w.proxydir); err != nil {
-		return nil, fmt.Errorf("writing proxy dir: %v", err)
+		return nil, fmt.Errorf("writing proxy dir: %w", err)
+	}
+	// Poll to capture the current file state.
+	if _, err := w.pollFiles(); err != nil {
+		return nil, fmt.Errorf("polling files: %v", err)
 	}
 	return w, nil
 }
@@ -106,7 +114,7 @@ func writeProxyDir(files map[string][]byte, dir string) error {
 	}
 	for mv, files := range filesByModule {
 		if err := proxydir.WriteModuleVersion(dir, mv.modulePath, mv.version, files); err != nil {
-			return fmt.Errorf("error writing %s@%s: %v", mv.modulePath, mv.version, err)
+			return fmt.Errorf("error writing %s@%s: %w", mv.modulePath, mv.version, err)
 		}
 	}
 	return nil
@@ -171,12 +179,18 @@ func (w *Workspace) URI(path string) protocol.DocumentURI {
 // URIToPath converts a uri to a workspace-relative path (or an absolute path,
 // if the uri is outside of the workspace).
 func (w *Workspace) URIToPath(uri protocol.DocumentURI) string {
+	fp := uri.SpanURI().Filename()
+	return w.relPath(fp)
+}
+
+// relPath returns a '/'-encoded path relative to the working directory (or an
+// absolute path if the file is outside of workdir)
+func (w *Workspace) relPath(fp string) string {
 	root := w.RootURI().SpanURI().Filename()
-	path := uri.SpanURI().Filename()
-	if rel, err := filepath.Rel(root, path); err == nil && !strings.HasPrefix(rel, "..") {
+	if rel, err := filepath.Rel(root, fp); err == nil && !strings.HasPrefix(rel, "..") {
 		return filepath.ToSlash(rel)
 	}
-	return filepath.ToSlash(path)
+	return filepath.ToSlash(fp)
 }
 
 func toURI(fp string) protocol.DocumentURI {
@@ -207,7 +221,7 @@ func (w *Workspace) RegexpSearch(path string, re string) (Pos, error) {
 func (w *Workspace) RemoveFile(ctx context.Context, path string) error {
 	fp := w.filePath(path)
 	if err := os.Remove(fp); err != nil {
-		return fmt.Errorf("removing %q: %v", path, err)
+		return fmt.Errorf("removing %q: %w", path, err)
 	}
 	evts := []FileEvent{{
 		Path: path,
@@ -260,6 +274,9 @@ func (w *Workspace) RunGoCommand(ctx context.Context, verb string, args ...strin
 }
 
 func (w *Workspace) sendEvents(ctx context.Context, evts []FileEvent) {
+	if len(evts) == 0 {
+		return
+	}
 	w.watcherMu.Lock()
 	watchers := make([]func(context.Context, []FileEvent), len(w.watchers))
 	copy(watchers, w.watchers)
@@ -274,7 +291,7 @@ func (w *Workspace) WriteFile(ctx context.Context, path, content string) error {
 	fp := w.filePath(path)
 	_, err := os.Stat(fp)
 	if err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("checking if %q exists: %v", path, err)
+		return fmt.Errorf("checking if %q exists: %w", path, err)
 	}
 	var changeType protocol.FileChangeType
 	if os.IsNotExist(err) {
@@ -299,19 +316,97 @@ func (w *Workspace) WriteFile(ctx context.Context, path, content string) error {
 func (w *Workspace) writeFileData(path string, content string) error {
 	fp := w.filePath(path)
 	if err := os.MkdirAll(filepath.Dir(fp), 0755); err != nil {
-		return fmt.Errorf("creating nested directory: %v", err)
+		return fmt.Errorf("creating nested directory: %w", err)
 	}
 	if err := ioutil.WriteFile(fp, []byte(content), 0644); err != nil {
-		return fmt.Errorf("writing %q: %v", path, err)
+		return fmt.Errorf("writing %q: %w", path, err)
 	}
 	return nil
+}
+
+// ListFiles lists files in the given directory, returning a map of relative
+// path to modification time.
+func (w *Workspace) ListFiles(dir string) (map[string]time.Time, error) {
+	files := make(map[string]time.Time)
+	absDir := w.filePath(dir)
+	if err := filepath.Walk(absDir, func(fp string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if info.IsDir() {
+			return nil
+		}
+		path := w.relPath(fp)
+		files[path] = info.ModTime()
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+	return files, nil
+}
+
+// CheckForFileChanges walks the working directory and checks for any files
+// that have changed since the last poll.
+func (w *Workspace) CheckForFileChanges(ctx context.Context) error {
+	evts, err := w.pollFiles()
+	if err != nil {
+		return err
+	}
+	w.sendEvents(ctx, evts)
+	return nil
+}
+
+// pollFiles updates w.files and calculates FileEvents corresponding to file
+// state changes since the last poll. It does not call sendEvents.
+func (w *Workspace) pollFiles() ([]FileEvent, error) {
+	w.fileMu.Lock()
+	defer w.fileMu.Unlock()
+
+	files, err := w.ListFiles(".")
+	if err != nil {
+		return nil, err
+	}
+	var evts []FileEvent
+	// Check which files have been added or modified.
+	for path, mtime := range files {
+		oldmtime, ok := w.files[path]
+		delete(w.files, path)
+		var typ protocol.FileChangeType
+		switch {
+		case !ok:
+			typ = protocol.Created
+		case oldmtime != mtime:
+			typ = protocol.Changed
+		default:
+			continue
+		}
+		evts = append(evts, FileEvent{
+			Path: path,
+			ProtocolEvent: protocol.FileEvent{
+				URI:  w.URI(path),
+				Type: typ,
+			},
+		})
+	}
+	// Any remaining files must have been deleted.
+	for path := range w.files {
+		evts = append(evts, FileEvent{
+			Path: path,
+			ProtocolEvent: protocol.FileEvent{
+				URI:  w.URI(path),
+				Type: protocol.Deleted,
+			},
+		})
+	}
+	w.files = files
+	return evts, nil
 }
 
 func (w *Workspace) removeAll() error {
 	var wsErr, gopathErr, proxyErr error
 	if w.gopath != "" {
 		if err := w.RunGoCommand(context.Background(), "clean", "-modcache"); err != nil {
-			gopathErr = fmt.Errorf("cleaning modcache: %v", err)
+			gopathErr = fmt.Errorf("cleaning modcache: %w", err)
 		} else {
 			gopathErr = os.RemoveAll(w.gopath)
 		}
@@ -323,7 +418,7 @@ func (w *Workspace) removeAll() error {
 		proxyErr = os.RemoveAll(w.proxydir)
 	}
 	if wsErr != nil || gopathErr != nil || proxyErr != nil {
-		return fmt.Errorf("error(s) cleaning workspace: removing workdir: %v; removing gopath: %v; removing proxy: %v", wsErr, gopathErr, proxyErr)
+		return fmt.Errorf("error(s) cleaning workspace: removing workdir: %v; removing gopath: %v; removing proxy: %w", wsErr, gopathErr, proxyErr)
 	}
 	return nil
 }

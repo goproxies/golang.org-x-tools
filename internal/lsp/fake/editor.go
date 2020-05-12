@@ -59,6 +59,10 @@ type EditorConfig struct {
 	// codeLens command. CodeLens which are not present in this map are left in
 	// their default state.
 	CodeLens map[string]bool
+
+	// SymbolMatcher is the config associated with the "symbolMatcher" gopls
+	// config option.
+	SymbolMatcher *string
 }
 
 // NewEditor Creates a new Editor.
@@ -133,6 +137,10 @@ func (e *Editor) configuration() map[string]interface{} {
 
 	if e.Config.CodeLens != nil {
 		config["codelens"] = e.Config.CodeLens
+	}
+
+	if e.Config.SymbolMatcher != nil {
+		config["symbolMatcher"] = *e.Config.SymbolMatcher
 	}
 
 	return config
@@ -280,7 +288,10 @@ func (e *Editor) SaveBuffer(ctx context.Context, path string) error {
 	if err := e.FormatBuffer(ctx, path); err != nil {
 		return fmt.Errorf("formatting before save: %w", err)
 	}
+	return e.SaveBufferWithoutActions(ctx, path)
+}
 
+func (e *Editor) SaveBufferWithoutActions(ctx context.Context, path string) error {
 	e.mu.Lock()
 	buf, ok := e.buffers[path]
 	if !ok {
@@ -516,6 +527,38 @@ func (e *Editor) GoToDefinition(ctx context.Context, path string, pos Pos) (stri
 		return "", Pos{}, fmt.Errorf("OpenFile: %w", err)
 	}
 	return newPath, newPos, nil
+}
+
+// Symbol performs a workspace symbol search using query
+func (e *Editor) Symbol(ctx context.Context, query string) ([]SymbolInformation, error) {
+	params := &protocol.WorkspaceSymbolParams{}
+	params.Query = query
+
+	resp, err := e.server.Symbol(ctx, params)
+	if err != nil {
+		return nil, fmt.Errorf("symbol: %w", err)
+	}
+	var res []SymbolInformation
+	for _, si := range resp {
+		ploc := si.Location
+		path := e.sandbox.Workdir.URIToPath(ploc.URI)
+		start := fromProtocolPosition(ploc.Range.Start)
+		end := fromProtocolPosition(ploc.Range.End)
+		rnge := Range{
+			Start: start,
+			End:   end,
+		}
+		loc := Location{
+			Path:  path,
+			Range: rnge,
+		}
+		res = append(res, SymbolInformation{
+			Name:     si.Name,
+			Kind:     si.Kind,
+			Location: loc,
+		})
+	}
+	return res, nil
 }
 
 // OrganizeImports requests and performs the source.organizeImports codeAction.

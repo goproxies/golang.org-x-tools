@@ -152,6 +152,10 @@ type View interface {
 	// user's workspace. In particular, if they are both outside of a module
 	// and their GOPATH.
 	ValidBuildConfiguration() bool
+
+	// IsGoPrivatePath reports whether target is a private import path, as identified
+	// by the GOPRIVATE environment variable.
+	IsGoPrivatePath(path string) bool
 }
 
 // Session represents a single connection from a client.
@@ -216,13 +220,14 @@ type FileModification struct {
 type FileAction int
 
 const (
-	Open = FileAction(iota)
+	UnknownFileAction = FileAction(iota)
+	Open
 	Change
 	Close
 	Save
 	Create
 	Delete
-	UnknownFileAction
+	InvalidateMetadata
 )
 
 // Cache abstracts the core logic of dealing with the environment from the

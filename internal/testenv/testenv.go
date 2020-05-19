@@ -40,6 +40,17 @@ var checkGoGoroot struct {
 }
 
 func hasTool(tool string) error {
+	if tool == "cgo" {
+		enabled, err := cgoEnabled(false)
+		if err != nil {
+			return fmt.Errorf("checking cgo: %v", err)
+		}
+		if !enabled {
+			return fmt.Errorf("cgo not enabled")
+		}
+		return nil
+	}
+
 	_, err := exec.LookPath(tool)
 	if err != nil {
 		return err
@@ -94,6 +105,19 @@ func hasTool(tool string) error {
 	return nil
 }
 
+func cgoEnabled(bypassEnvironment bool) (bool, error) {
+	cmd := exec.Command("go", "env", "CGO_ENABLED")
+	if bypassEnvironment {
+		cmd.Env = append(append([]string(nil), os.Environ()...), "CGO_ENABLED=")
+	}
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return false, err
+	}
+	enabled := strings.TrimSpace(string(out))
+	return enabled == "1", nil
+}
+
 func allowMissingTool(tool string) bool {
 	if runtime.GOOS == "android" {
 		// Android builds generally run tests on a separate machine from the build,
@@ -102,6 +126,15 @@ func allowMissingTool(tool string) bool {
 	}
 
 	switch tool {
+	case "cgo":
+		if strings.HasSuffix(os.Getenv("GO_BUILDER_NAME"), "-nocgo") {
+			// Explicitly disabled on -nocgo builders.
+			return true
+		}
+		if enabled, err := cgoEnabled(true); err == nil && !enabled {
+			// No platform support.
+			return true
+		}
 	case "go":
 		if os.Getenv("GO_BUILDER_NAME") == "illumos-amd64-joyent" {
 			// Work around a misconfigured builder (see https://golang.org/issue/33950).
@@ -125,6 +158,7 @@ func allowMissingTool(tool string) bool {
 }
 
 // NeedsTool skips t if the named tool is not present in the path.
+// As a special case, "cgo" means "go" is present and can compile cgo programs.
 func NeedsTool(t Testing, tool string) {
 	if t, ok := t.(helperer); ok {
 		t.Helper()

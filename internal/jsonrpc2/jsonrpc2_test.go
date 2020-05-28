@@ -18,6 +18,7 @@ import (
 
 	"golang.org/x/tools/internal/event/export/eventtest"
 	"golang.org/x/tools/internal/jsonrpc2"
+	"golang.org/x/tools/internal/stack/stacktest"
 )
 
 var logRPC = flag.Bool("logrpc", false, "Enable jsonrpc2 communication logging")
@@ -62,6 +63,7 @@ func (test *callTest) verifyResults(t *testing.T, results interface{}) {
 }
 
 func TestCall(t *testing.T) {
+	stacktest.NoLeak(t)
 	ctx := eventtest.NewContext(context.Background(), t)
 	for _, headers := range []bool{false, true} {
 		name := "Plain"
@@ -117,11 +119,7 @@ func run(ctx context.Context, t *testing.T, withHeaders bool, r io.ReadCloser, w
 	wg.Add(1)
 	go func() {
 		defer func() {
-			// this will happen when Run returns, which means at least one of the
-			// streams has already been closed
-			// we close both streams anyway, this may be redundant but is safe
-			r.Close()
-			w.Close()
+			stream.Close()
 			// and then signal that this connection is done
 			wg.Done()
 		}()

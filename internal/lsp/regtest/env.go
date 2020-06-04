@@ -12,7 +12,6 @@ import (
 	"sync"
 	"testing"
 
-	"golang.org/x/tools/internal/jsonrpc2"
 	"golang.org/x/tools/internal/jsonrpc2/servertest"
 	"golang.org/x/tools/internal/lsp/fake"
 	"golang.org/x/tools/internal/lsp/protocol"
@@ -31,7 +30,6 @@ type Env struct {
 	Sandbox *fake.Sandbox
 	Editor  *fake.Editor
 	Server  servertest.Connector
-	Conn    *jsonrpc2.Conn
 
 	// mu guards the fields below, for the purpose of checking conditions on
 	// every change to diagnostics.
@@ -87,7 +85,11 @@ func (s State) String() string {
 		if name == "" {
 			name = fmt.Sprintf("!NO NAME(token: %s)", token)
 		}
-		fmt.Fprintf(&b, "\t%s: %.2f", name, state.percent)
+		fmt.Fprintf(&b, "\t%s: %.2f\n", name, state.percent)
+	}
+	b.WriteString("#### completed work:\n")
+	for name, count := range s.completedWork {
+		fmt.Fprintf(&b, "\t%s: %d\n", name, count)
 	}
 	return b.String()
 }
@@ -110,7 +112,6 @@ func NewEnv(ctx context.Context, t *testing.T, scratch *fake.Sandbox, ts servert
 		Ctx:     ctx,
 		Sandbox: scratch,
 		Server:  ts,
-		Conn:    conn,
 		state: State{
 			diagnostics:     make(map[string]*protocol.PublishDiagnosticsParams),
 			outstandingWork: make(map[string]*workProgress),

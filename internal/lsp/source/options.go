@@ -94,6 +94,7 @@ func DefaultOptions() Options {
 					protocol.SourceOrganizeImports: true,
 					protocol.QuickFix:              true,
 					protocol.RefactorRewrite:       true,
+					protocol.RefactorExtract:       true,
 				},
 				Mod: {
 					protocol.SourceOrganizeImports: true,
@@ -658,7 +659,7 @@ func convenienceAnalyzers() map[string]Analyzer {
 	return map[string]Analyzer{
 		fillstruct.Analyzer.Name: {
 			Analyzer: fillstruct.Analyzer,
-			enabled:  true,
+			enabled:  false,
 		},
 	}
 }

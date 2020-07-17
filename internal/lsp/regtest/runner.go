@@ -140,10 +140,12 @@ func InGOPATH() RunOption {
 	})
 }
 
+type TestFunc func(t *testing.T, env *Env)
+
 // Run executes the test function in the default configured gopls execution
 // modes. For each a test run, a new workspace is created containing the
 // un-txtared files specified by filedata.
-func (r *Runner) Run(t *testing.T, filedata string, test func(t *testing.T, e *Env), opts ...RunOption) {
+func (r *Runner) Run(t *testing.T, filedata string, test TestFunc, opts ...RunOption) {
 	t.Helper()
 	config := r.defaultConfig()
 	for _, opt := range opts {
@@ -235,7 +237,7 @@ func (s *loggingFramer) printBuffers(testname string, w io.Writer) {
 }
 
 func singletonServer(ctx context.Context, t *testing.T) jsonrpc2.StreamServer {
-	return lsprpc.NewStreamServer(cache.New(ctx, nil))
+	return lsprpc.NewStreamServer(cache.New(ctx, nil), false)
 }
 
 func (r *Runner) forwardedServer(ctx context.Context, t *testing.T) jsonrpc2.StreamServer {
@@ -243,15 +245,15 @@ func (r *Runner) forwardedServer(ctx context.Context, t *testing.T) jsonrpc2.Str
 	return lsprpc.NewForwarder("tcp", ts.Addr)
 }
 
-// getTestServer gets the test server instance to connect to, or creates one if
-// it doesn't exist.
+// getTestServer gets the shared test server instance to connect to, or creates
+// one if it doesn't exist.
 func (r *Runner) getTestServer() *servertest.TCPServer {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.ts == nil {
 		ctx := context.Background()
 		ctx = debug.WithInstance(ctx, "", "")
-		ss := lsprpc.NewStreamServer(cache.New(ctx, nil))
+		ss := lsprpc.NewStreamServer(cache.New(ctx, nil), false)
 		r.ts = servertest.NewTCPServer(ctx, ss, nil)
 	}
 	return r.ts

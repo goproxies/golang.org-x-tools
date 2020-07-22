@@ -22,6 +22,14 @@ go 1.12
 package blah
 
 const Name = "Blah"
+-- random.org@v1.2.3/go.mod --
+module random.org
+
+go 1.12
+-- random.org@v1.2.3/blah/blah.go --
+package hello
+
+const Name = "Hello"
 `
 
 func TestModFileModification(t *testing.T) {
@@ -37,28 +45,58 @@ package main
 import "example.com/blah"
 
 func main() {
-	fmt.Println(blah.Name)
-}`
-	withOptions(WithProxy(proxy)).run(t, untidyModule, func(t *testing.T, env *Env) {
-		// Open the file and make sure that the initial workspace load does not
-		// modify the go.mod file.
-		goModContent := env.ReadWorkspaceFile("go.mod")
-		env.OpenFile("main.go")
-		env.Await(
-			env.DiagnosticAtRegexp("main.go", "\"example.com/blah\""),
-		)
-		if got := env.ReadWorkspaceFile("go.mod"); got != goModContent {
-			t.Fatalf("go.mod changed on disk:\n%s", tests.Diff(goModContent, got))
-		}
-		// Save the buffer, which will format and organize imports.
-		// Confirm that the go.mod file still does not change.
-		env.SaveBuffer("main.go")
-		env.Await(
-			env.DiagnosticAtRegexp("main.go", "\"example.com/blah\""),
-		)
-		if got := env.ReadWorkspaceFile("go.mod"); got != goModContent {
-			t.Fatalf("go.mod changed on disk:\n%s", tests.Diff(goModContent, got))
-		}
+	println(blah.Name)
+}
+`
+	t.Run("basic", func(t *testing.T) {
+		withOptions(WithProxy(proxy)).run(t, untidyModule, func(t *testing.T, env *Env) {
+			// Open the file and make sure that the initial workspace load does not
+			// modify the go.mod file.
+			goModContent := env.ReadWorkspaceFile("go.mod")
+			env.OpenFile("main.go")
+			env.Await(
+				env.DiagnosticAtRegexp("main.go", "\"example.com/blah\""),
+			)
+			if got := env.ReadWorkspaceFile("go.mod"); got != goModContent {
+				t.Fatalf("go.mod changed on disk:\n%s", tests.Diff(goModContent, got))
+			}
+			// Save the buffer, which will format and organize imports.
+			// Confirm that the go.mod file still does not change.
+			env.SaveBuffer("main.go")
+			env.Await(
+				env.DiagnosticAtRegexp("main.go", "\"example.com/blah\""),
+			)
+			if got := env.ReadWorkspaceFile("go.mod"); got != goModContent {
+				t.Fatalf("go.mod changed on disk:\n%s", tests.Diff(goModContent, got))
+			}
+		})
+	})
+
+	// Reproduce golang/go#40269 by deleting and recreating main.go.
+	t.Run("delete main.go", func(t *testing.T) {
+		t.Skipf("This test will be flaky until golang/go#40269 is resolved.")
+
+		withOptions(WithProxy(proxy)).run(t, untidyModule, func(t *testing.T, env *Env) {
+			goModContent := env.ReadWorkspaceFile("go.mod")
+			mainContent := env.ReadWorkspaceFile("main.go")
+			env.OpenFile("main.go")
+			env.SaveBuffer("main.go")
+
+			env.RemoveWorkspaceFile("main.go")
+			env.Await(
+				CompletedWork(lsp.DiagnosticWorkTitle(lsp.FromDidOpen), 1),
+				CompletedWork(lsp.DiagnosticWorkTitle(lsp.FromDidSave), 1),
+				CompletedWork(lsp.DiagnosticWorkTitle(lsp.FromDidChangeWatchedFiles), 2),
+			)
+
+			env.WriteWorkspaceFile("main.go", mainContent)
+			env.Await(
+				env.DiagnosticAtRegexp("main.go", "\"example.com/blah\""),
+			)
+			if got := env.ReadWorkspaceFile("go.mod"); got != goModContent {
+				t.Fatalf("go.mod changed on disk:\n%s", tests.Diff(goModContent, got))
+			}
+		})
 	})
 }
 
@@ -291,4 +329,119 @@ require (
 			t.Fatalf("suggested fixes failed:\n%s", tests.Diff(want, got))
 		}
 	}, WithProxy(badModule))
+}
+
+// Reproduces golang/go#38232.
+func TestUnknownRevision(t *testing.T) {
+	testenv.NeedsGo1Point(t, 14)
+
+	const unknown = `
+-- go.mod --
+module mod.com
+
+require (
+	example.com v1.2.2
+)
+-- main.go --
+package main
+
+import "example.com/blah"
+
+func main() {
+	var x = blah.Name
+}
+`
+
+	// Start from a bad state/bad IWL, and confirm that we recover.
+	t.Run("bad", func(t *testing.T) {
+		runner.Run(t, unknown, func(t *testing.T, env *Env) {
+			env.Await(
+				CompletedWork(lsp.DiagnosticWorkTitle(lsp.FromInitialWorkspaceLoad), 1),
+			)
+			env.OpenFile("go.mod")
+			env.Await(
+				env.DiagnosticAtRegexp("go.mod", "example.com v1.2.2"),
+			)
+			env.RegexpReplace("go.mod", "v1.2.2", "v1.2.3")
+			env.Editor.SaveBufferWithoutActions(env.Ctx, "go.mod") // go.mod changes must be on disk
+			env.Await(
+				env.DiagnosticAtRegexp("main.go", "x = "),
+			)
+		}, WithProxy(proxy))
+	})
+
+	const known = `
+-- go.mod --
+module mod.com
+
+require (
+	example.com v1.2.3
+)
+-- main.go --
+package main
+
+import "example.com/blah"
+
+func main() {
+	var x = blah.Name
+}
+`
+	// Start from a good state, transform to a bad state, and confirm that we
+	// still recover.
+	t.Run("good", func(t *testing.T) {
+		runner.Run(t, known, func(t *testing.T, env *Env) {
+			env.OpenFile("go.mod")
+			env.Await(
+				env.DiagnosticAtRegexp("main.go", "x = "),
+			)
+			env.RegexpReplace("go.mod", "v1.2.3", "v1.2.2")
+			env.Editor.SaveBufferWithoutActions(env.Ctx, "go.mod") // go.mod changes must be on disk
+			env.Await(
+				env.DiagnosticAtRegexp("go.mod", "example.com v1.2.2"),
+			)
+			env.RegexpReplace("go.mod", "v1.2.2", "v1.2.3")
+			env.Editor.SaveBufferWithoutActions(env.Ctx, "go.mod") // go.mod changes must be on disk
+			env.Await(
+				env.DiagnosticAtRegexp("main.go", "x = "),
+			)
+		}, WithProxy(proxy))
+	})
+}
+
+func TestTidyOnSave(t *testing.T) {
+	testenv.NeedsGo1Point(t, 14)
+
+	const untidyModule = `
+-- go.mod --
+module mod.com
+
+go 1.14
+
+require random.org v1.2.3
+-- main.go --
+package main
+
+import "example.com/blah"
+
+func main() {
+	fmt.Println(blah.Name)
+}
+`
+	withOptions(WithProxy(proxy)).run(t, untidyModule, func(t *testing.T, env *Env) {
+		env.OpenFile("go.mod")
+		env.Await(
+			env.DiagnosticAtRegexp("main.go", `"example.com/blah"`),
+			env.DiagnosticAtRegexp("go.mod", `require random.org v1.2.3`),
+		)
+		env.SaveBuffer("go.mod")
+		const want = `module mod.com
+
+go 1.14
+
+require example.com v1.2.3
+`
+		if got := env.ReadWorkspaceFile("go.mod"); got != want {
+			t.Fatalf("unexpected go.mod content:\n%s", tests.Diff(want, got))
+		}
+	})
 }

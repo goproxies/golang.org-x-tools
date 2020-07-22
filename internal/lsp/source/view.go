@@ -274,6 +274,27 @@ const (
 	InvalidateMetadata
 )
 
+func (a FileAction) String() string {
+	switch a {
+	case Open:
+		return "Open"
+	case Change:
+		return "Change"
+	case Close:
+		return "Close"
+	case Save:
+		return "Save"
+	case Create:
+		return "Create"
+	case Delete:
+		return "Delete"
+	case InvalidateMetadata:
+		return "InvalidateMetadata"
+	default:
+		return "Unknown"
+	}
+}
+
 // Cache abstracts the core logic of dealing with the environment from the
 // higher level logic that processes the information to produce results.
 // The cache provides access to files and their contents, so the source
@@ -344,8 +365,14 @@ type ModWhyHandle interface {
 }
 
 type ModTidyHandle interface {
+	// Mod is the ParseModHandle associated with the go.mod file being tidied.
+	ParseModHandle() ParseModHandle
+
 	// Tidy returns the results of `go mod tidy` for the module.
 	Tidy(ctx context.Context) ([]Error, error)
+
+	// TidiedContent is the content of the tidied go.mod file.
+	TidiedContent(ctx context.Context) ([]byte, error)
 }
 
 var ErrTmpModfileUnsupported = errors.New("-modfile is unsupported for this Go version")
@@ -495,4 +522,7 @@ func (e *Error) Error() string {
 	return fmt.Sprintf("%s:%s: %s", e.URI, e.Range, e.Message)
 }
 
-var InconsistentVendoring = errors.New("inconsistent vendoring")
+var (
+	InconsistentVendoring = errors.New("inconsistent vendoring")
+	PackagesLoadError     = errors.New("packages.Load error")
+)

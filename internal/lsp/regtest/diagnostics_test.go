@@ -258,8 +258,17 @@ func Hello() {
 			env.SaveBuffer("go.mod")
 			env.Await(
 				EmptyDiagnostics("main.go"),
+			)
+			metBy := env.Await(
 				env.DiagnosticAtRegexp("bob/bob.go", "x"),
 			)
+			d, ok := metBy[0].(*protocol.PublishDiagnosticsParams)
+			if !ok {
+				t.Fatalf("unexpected met by result %v (%T)", metBy, metBy)
+			}
+			if len(d.Diagnostics) != 1 {
+				t.Fatalf("expected 1 diagnostic, got %v", len(d.Diagnostics))
+			}
 		})
 	})
 	t.Run("initialized", func(t *testing.T) {
@@ -393,7 +402,7 @@ func TestResolveDiagnosticWithDownload(t *testing.T) {
 		// diagnostic for the wrong formatting type.
 		// TODO: we should be able to easily also match the diagnostic message.
 		env.Await(env.DiagnosticAtRegexp("print.go", "fmt.Printf"))
-	}, WithProxy(testPackageWithRequireProxy))
+	}, WithProxyFiles(testPackageWithRequireProxy))
 }
 
 func TestMissingDependency(t *testing.T) {
@@ -421,7 +430,7 @@ func Hello() {
 
 // Tests golang/go#37984: GOPATH should be read from the go command.
 func TestNoGOPATH_Issue37984(t *testing.T) {
-	const missingImport = `
+	const files = `
 -- main.go --
 package main
 
@@ -429,17 +438,18 @@ func _() {
 	fmt.Println("Hello World")
 }
 `
-	runner.Run(t, missingImport, func(t *testing.T, env *Env) {
+	editorConfig := fake.EditorConfig{Env: map[string]string{"GOPATH": ""}}
+	withOptions(WithEditorConfig(editorConfig)).run(t, files, func(t *testing.T, env *Env) {
 		env.OpenFile("main.go")
 		env.Await(env.DiagnosticAtRegexp("main.go", "fmt"))
 		env.SaveBuffer("main.go")
 		env.Await(EmptyDiagnostics("main.go"))
-	}, WithEditorConfig(fake.EditorConfig{Env: []string{"GOPATH="}}))
+	})
 }
 
 // Tests golang/go#38669.
 func TestEqualInEnv_Issue38669(t *testing.T) {
-	const missingImport = `
+	const files = `
 -- go.mod --
 module mod.com
 
@@ -452,11 +462,12 @@ package x
 
 var X = 0
 `
-	runner.Run(t, missingImport, func(t *testing.T, env *Env) {
+	editorConfig := fake.EditorConfig{Env: map[string]string{"GOFLAGS": "-tags=foo"}}
+	withOptions(WithEditorConfig(editorConfig)).run(t, files, func(t *testing.T, env *Env) {
 		env.OpenFile("main.go")
 		env.OrganizeImports("main.go")
 		env.Await(EmptyDiagnostics("main.go"))
-	}, WithEditorConfig(fake.EditorConfig{Env: []string{"GOFLAGS=-tags=foo"}}))
+	})
 }
 
 // Tests golang/go#38467.
@@ -653,7 +664,7 @@ func main() {
 		env.Await(
 			env.DiagnosticAtRegexp("main.go", `"github.com/ardanlabs/conf"`),
 		)
-	}, WithProxy(ardanLabsProxy))
+	}, WithProxyFiles(ardanLabsProxy))
 }
 
 // Test for golang/go#38207.
@@ -689,7 +700,7 @@ func main() {
 		env.Await(
 			EmptyDiagnostics("main.go"),
 		)
-	}, WithProxy(ardanLabsProxy))
+	}, WithProxyFiles(ardanLabsProxy))
 }
 
 // Test for golang/go#36960.

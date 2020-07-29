@@ -6,8 +6,9 @@ package lsp
 
 import (
 	"context"
-	"crypto/sha1"
+	"crypto/sha256"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"sync"
 
@@ -16,6 +17,7 @@ import (
 	"golang.org/x/tools/internal/lsp/mod"
 	"golang.org/x/tools/internal/lsp/protocol"
 	"golang.org/x/tools/internal/lsp/source"
+	"golang.org/x/tools/internal/span"
 	"golang.org/x/tools/internal/xcontext"
 	"golang.org/x/xerrors"
 )
@@ -89,7 +91,7 @@ func (s *Server) diagnose(ctx context.Context, snapshot source.Snapshot, alwaysA
 	}
 
 	// Diagnose all of the packages in the workspace.
-	wsPackages, err := snapshot.WorkspacePackages(ctx)
+	wsPkgs, err := snapshot.WorkspacePackages(ctx)
 	if err != nil {
 		// Try constructing a more helpful error message out of this error.
 		if s.handleFatalErrors(ctx, snapshot, modErr, err) {
@@ -110,21 +112,37 @@ If you believe this is a mistake, please file an issue: https://github.com/golan
 		showMsg *protocol.ShowMessageParams
 		wg      sync.WaitGroup
 	)
-	for _, ph := range wsPackages {
+	for _, pkg := range wsPkgs {
 		wg.Add(1)
-		go func(ph source.PackageHandle) {
+		go func(pkg source.Package) {
 			defer wg.Done()
 
+			detailsDir := ""
 			// Only run analyses for packages with open files.
 			withAnalysis := alwaysAnalyze
-			for _, pgh := range ph.CompiledGoFiles() {
-				if snapshot.IsOpen(pgh.File().URI()) {
+			for _, pgf := range pkg.CompiledGoFiles() {
+				if snapshot.IsOpen(pgf.URI) {
 					withAnalysis = true
-					break
+				}
+				if detailsDir == "" {
+					dir := filepath.Dir(pgf.URI.Filename())
+					if s.gcOptimizatonDetails[span.URI(dir)] {
+						detailsDir = dir
+					}
 				}
 			}
 
-			pkgReports, warn, err := source.Diagnostics(ctx, snapshot, ph, withAnalysis)
+			pkgReports, warn, err := source.Diagnostics(ctx, snapshot, pkg, withAnalysis)
+			if detailsDir != "" {
+				var more map[source.FileIdentity][]*source.Diagnostic
+				more, err = source.DoGcDetails(ctx, snapshot, detailsDir)
+				if err != nil {
+					event.Error(ctx, "warning: gcdetails", err, tag.Snapshot.Of(snapshot.ID()))
+				}
+				for k, v := range more {
+					pkgReports[k] = append(pkgReports[k], v...)
+				}
+			}
 
 			// Check if might want to warn the user about their build configuration.
 			// Our caller decides whether to send the message.
@@ -135,7 +153,7 @@ If you believe this is a mistake, please file an issue: https://github.com/golan
 				}
 			}
 			if err != nil {
-				event.Error(ctx, "warning: diagnose package", err, tag.Snapshot.Of(snapshot.ID()), tag.Package.Of(ph.ID()))
+				event.Error(ctx, "warning: diagnose package", err, tag.Snapshot.Of(snapshot.ID()), tag.Package.Of(pkg.ID()))
 				return
 			}
 
@@ -154,7 +172,7 @@ If you believe this is a mistake, please file an issue: https://github.com/golan
 				}
 			}
 			reportsMu.Unlock()
-		}(ph)
+		}(pkg)
 	}
 	wg.Wait()
 	return reports, showMsg
@@ -172,7 +190,7 @@ func diagnosticKey(d *source.Diagnostic) string {
 		related += fmt.Sprintf("%s%s%s", r.URI, r.Message, r.Range)
 	}
 	key := fmt.Sprintf("%s%s%s%s%s%s", d.Message, d.Range, d.Severity, d.Source, tags, related)
-	return fmt.Sprintf("%x", sha1.Sum([]byte(key)))
+	return fmt.Sprintf("%x", sha256.Sum256([]byte(key)))
 }
 
 func (s *Server) publishReports(ctx context.Context, snapshot source.Snapshot, reports map[idWithAnalysis]map[string]*source.Diagnostic) {

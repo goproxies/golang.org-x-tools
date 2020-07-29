@@ -33,6 +33,8 @@ import (
 )
 
 type View struct {
+	memoize.Arg // allow as a memoize.Function arg
+
 	session *Session
 	id      string
 
@@ -143,14 +145,13 @@ type View struct {
 
 type builtinPackageHandle struct {
 	handle *memoize.Handle
-	file   source.ParseGoHandle
 }
 
 type builtinPackageData struct {
 	memoize.NoCopy
 
 	pkg *ast.Package
-	pgh *parseGoHandle
+	pgf *source.ParsedGoFile
 	err error
 }
 
@@ -158,8 +159,8 @@ func (d *builtinPackageData) Package() *ast.Package {
 	return d.pkg
 }
 
-func (d *builtinPackageData) ParseGoHandle() source.ParseGoHandle {
-	return d.pgh
+func (d *builtinPackageData) ParsedFile() *source.ParsedGoFile {
+	return d.pgf
 }
 
 // fileBase holds the common functionality for all files.
@@ -234,10 +235,10 @@ func tempModFile(modFh, sumFH source.FileHandle) (tmpURI span.URI, cleanup func(
 	if sumFH != nil {
 		sumContents, err := sumFH.Read()
 		if err != nil {
-			return "", nil, err
+			return "", cleanup, err
 		}
 		if err := ioutil.WriteFile(tmpSumName, sumContents, 0655); err != nil {
-			return "", nil, err
+			return "", cleanup, err
 		}
 	}
 
@@ -300,7 +301,7 @@ func (v *View) BuiltinPackage(ctx context.Context) (source.BuiltinPackage, error
 	if v.builtin == nil {
 		return nil, errors.Errorf("no builtin package for view %s", v.name)
 	}
-	data, err := v.builtin.handle.Get(ctx)
+	data, err := v.builtin.handle.Get(ctx, v)
 	if err != nil {
 		return nil, err
 	}
@@ -332,27 +333,27 @@ func (v *View) buildBuiltinPackage(ctx context.Context, goFiles []string) error 
 	if err != nil {
 		return err
 	}
-	pgh := v.session.cache.parseGoHandle(ctx, fh, source.ParseFull)
-	fset := v.session.cache.fset
-	h := v.session.cache.store.Bind(fh.Identity(), func(ctx context.Context) interface{} {
-		file, _, _, _, err := pgh.Parse(ctx)
+	h := v.session.cache.store.Bind(fh.Identity(), func(ctx context.Context, arg memoize.Arg) interface{} {
+		view := arg.(*View)
+
+		pgh := view.session.cache.parseGoHandle(ctx, fh, source.ParseFull)
+		pgf, _, err := view.parseGo(ctx, pgh)
 		if err != nil {
 			return &builtinPackageData{err: err}
 		}
-		pkg, err := ast.NewPackage(fset, map[string]*ast.File{
-			pgh.File().URI().Filename(): file,
+		pkg, err := ast.NewPackage(view.session.cache.fset, map[string]*ast.File{
+			pgf.URI.Filename(): pgf.File,
 		}, nil, nil)
 		if err != nil {
 			return &builtinPackageData{err: err}
 		}
 		return &builtinPackageData{
-			pgh: pgh,
+			pgf: pgf,
 			pkg: pkg,
 		}
 	})
 	v.builtin = &builtinPackageHandle{
 		handle: h,
-		file:   pgh,
 	}
 	return nil
 }
@@ -565,7 +566,7 @@ func (v *View) WorkspaceDirectories(ctx context.Context) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	parsed, _, _, err := pmh.Parse(ctx)
+	parsed, _, _, err := pmh.Parse(ctx, v.Snapshot())
 	if err != nil {
 		return nil, err
 	}

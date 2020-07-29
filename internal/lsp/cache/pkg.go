@@ -16,14 +16,10 @@ import (
 
 // pkg contains the type information needed by the source package.
 type pkg struct {
-	// ID and package path have their own types to avoid being used interchangeably.
-	id              packageID
-	name            packageName
-	pkgPath         packagePath
+	m               *metadata
 	mode            source.ParseMode
-	forTest         packagePath
-	goFiles         []*parseGoHandle
-	compiledGoFiles []*parseGoHandle
+	goFiles         []*source.ParsedGoFile
+	compiledGoFiles []*source.ParsedGoFile
 	errors          []*source.Error
 	imports         map[packagePath]*pkg
 	module          *packages.Module
@@ -49,46 +45,39 @@ type directoryURI span.URI
 type viewLoadScope span.URI
 
 func (p *pkg) ID() string {
-	return string(p.id)
+	return string(p.m.id)
 }
 
 func (p *pkg) Name() string {
-	return string(p.name)
+	return string(p.m.name)
 }
 
 func (p *pkg) PkgPath() string {
-	return string(p.pkgPath)
+	return string(p.m.pkgPath)
 }
 
-func (p *pkg) CompiledGoFiles() []source.ParseGoHandle {
-	var files []source.ParseGoHandle
-	for _, f := range p.compiledGoFiles {
-		files = append(files, f)
-	}
-	return files
+func (p *pkg) CompiledGoFiles() []*source.ParsedGoFile {
+	return p.compiledGoFiles
 }
 
-func (p *pkg) File(uri span.URI) (source.ParseGoHandle, error) {
-	for _, ph := range p.compiledGoFiles {
-		if ph.File().URI() == uri {
-			return ph, nil
+func (p *pkg) File(uri span.URI) (*source.ParsedGoFile, error) {
+	for _, cgf := range p.compiledGoFiles {
+		if cgf.URI == uri {
+			return cgf, nil
 		}
 	}
-	for _, ph := range p.goFiles {
-		if ph.File().URI() == uri {
-			return ph, nil
+	for _, gf := range p.goFiles {
+		if gf.URI == uri {
+			return gf, nil
 		}
 	}
-	return nil, errors.Errorf("no ParseGoHandle for %s", uri)
+	return nil, errors.Errorf("no parsed file for %s in %v", uri, p.m.id)
 }
 
 func (p *pkg) GetSyntax() []*ast.File {
 	var syntax []*ast.File
-	for _, ph := range p.compiledGoFiles {
-		file, _, _, _, err := ph.Cached()
-		if err == nil {
-			syntax = append(syntax, file)
-		}
+	for _, pgf := range p.compiledGoFiles {
+		syntax = append(syntax, pgf.File)
 	}
 	return syntax
 }
@@ -114,7 +103,7 @@ func (p *pkg) IsIllTyped() bool {
 }
 
 func (p *pkg) ForTest() string {
-	return string(p.forTest)
+	return string(p.m.forTest)
 }
 
 func (p *pkg) GetImport(pkgPath string) (source.Package, error) {
@@ -123,6 +112,14 @@ func (p *pkg) GetImport(pkgPath string) (source.Package, error) {
 	}
 	// Don't return a nil pointer because that still satisfies the interface.
 	return nil, errors.Errorf("no imported package for %s", pkgPath)
+}
+
+func (pkg *pkg) MissingDependencies() []string {
+	var md []string
+	for i := range pkg.m.missingDeps {
+		md = append(md, string(i))
+	}
+	return md
 }
 
 func (p *pkg) Imports() []source.Package {

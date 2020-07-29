@@ -23,6 +23,7 @@ var lensFuncs = map[string]lensFunc{
 	CommandGenerate.Name:      goGenerateCodeLens,
 	CommandTest.Name:          runTestCodeLens,
 	CommandRegenerateCgo.Name: regenerateCgoLens,
+	CommandToggleDetails.Name: toggleDetailsCodeLens,
 }
 
 // CodeLens computes code lens for Go source code.
@@ -52,21 +53,17 @@ func runTestCodeLens(ctx context.Context, snapshot Snapshot, fh FileHandle) ([]p
 	if !strings.HasSuffix(fh.URI().Filename(), "_test.go") {
 		return nil, nil
 	}
-	pkg, pgh, err := getParsedFile(ctx, snapshot, fh, WidestPackageHandle)
+	pkg, pgf, err := getParsedFile(ctx, snapshot, fh, WidestPackage)
 	if err != nil {
 		return nil, err
 	}
-	file, _, m, _, err := pgh.Cached()
-	if err != nil {
-		return nil, err
-	}
-	for _, d := range file.Decls {
+	for _, d := range pgf.File.Decls {
 		fn, ok := d.(*ast.FuncDecl)
 		if !ok {
 			continue
 		}
 		fset := snapshot.View().Session().Cache().FileSet()
-		rng, err := newMappedRange(fset, m, d.Pos(), d.Pos()).Range()
+		rng, err := newMappedRange(fset, pgf.Mapper, d.Pos(), d.Pos()).Range()
 		if err != nil {
 			return nil, err
 		}
@@ -143,19 +140,18 @@ func matchTestFunc(fn *ast.FuncDecl, pkg Package, nameRe *regexp.Regexp, paramID
 }
 
 func goGenerateCodeLens(ctx context.Context, snapshot Snapshot, fh FileHandle) ([]protocol.CodeLens, error) {
-	pgh := snapshot.View().Session().Cache().ParseGoHandle(ctx, fh, ParseFull)
-	file, _, m, _, err := pgh.Parse(ctx)
+	pgf, err := snapshot.ParseGo(ctx, fh, ParseFull)
 	if err != nil {
 		return nil, err
 	}
 	const ggDirective = "//go:generate"
-	for _, c := range file.Comments {
+	for _, c := range pgf.File.Comments {
 		for _, l := range c.List {
 			if !strings.HasPrefix(l.Text, ggDirective) {
 				continue
 			}
 			fset := snapshot.View().Session().Cache().FileSet()
-			rng, err := newMappedRange(fset, m, l.Pos(), l.Pos()+token.Pos(len(ggDirective))).Range()
+			rng, err := newMappedRange(fset, pgf.Mapper, l.Pos(), l.Pos()+token.Pos(len(ggDirective))).Range()
 			if err != nil {
 				return nil, err
 			}
@@ -193,13 +189,12 @@ func goGenerateCodeLens(ctx context.Context, snapshot Snapshot, fh FileHandle) (
 }
 
 func regenerateCgoLens(ctx context.Context, snapshot Snapshot, fh FileHandle) ([]protocol.CodeLens, error) {
-	pgh := snapshot.View().Session().Cache().ParseGoHandle(ctx, fh, ParseFull)
-	file, _, m, _, err := pgh.Parse(ctx)
+	pgf, err := snapshot.ParseGo(ctx, fh, ParseFull)
 	if err != nil {
 		return nil, err
 	}
 	var c *ast.ImportSpec
-	for _, imp := range file.Imports {
+	for _, imp := range pgf.File.Imports {
 		if imp.Path.Value == `"C"` {
 			c = imp
 		}
@@ -208,7 +203,7 @@ func regenerateCgoLens(ctx context.Context, snapshot Snapshot, fh FileHandle) ([
 		return nil, nil
 	}
 	fset := snapshot.View().Session().Cache().FileSet()
-	rng, err := newMappedRange(fset, m, c.Pos(), c.EndPos).Range()
+	rng, err := newMappedRange(fset, pgf.Mapper, c.Pos(), c.EndPos).Range()
 	if err != nil {
 		return nil, err
 	}
@@ -222,6 +217,29 @@ func regenerateCgoLens(ctx context.Context, snapshot Snapshot, fh FileHandle) ([
 			Command: protocol.Command{
 				Title:     "regenerate cgo definitions",
 				Command:   CommandRegenerateCgo.Name,
+				Arguments: jsonArgs,
+			},
+		},
+	}, nil
+}
+
+func toggleDetailsCodeLens(ctx context.Context, snapshot Snapshot, fh FileHandle) ([]protocol.CodeLens, error) {
+	_, pgf, err := getParsedFile(ctx, snapshot, fh, WidestPackage)
+	fset := snapshot.View().Session().Cache().FileSet()
+	rng, err := newMappedRange(fset, pgf.Mapper, pgf.File.Package, pgf.File.Package).Range()
+	if err != nil {
+		return nil, err
+	}
+	jsonArgs, err := MarshalArgs(fh.URI())
+	if err != nil {
+		return nil, err
+	}
+	return []protocol.CodeLens{
+		{
+			Range: rng,
+			Command: protocol.Command{
+				Title:     "Toggle gc annotation details",
+				Command:   CommandToggleDetails.Name,
 				Arguments: jsonArgs,
 			},
 		},

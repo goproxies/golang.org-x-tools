@@ -8,7 +8,6 @@ import (
 	"context"
 	"fmt"
 	"go/ast"
-	"go/token"
 	"io/ioutil"
 	"sort"
 	"strconv"
@@ -56,8 +55,8 @@ func (mth *modTidyHandle) ParseModHandle() source.ParseModHandle {
 	return mth.pmh
 }
 
-func (mth *modTidyHandle) Tidy(ctx context.Context) ([]source.Error, error) {
-	v, err := mth.handle.Get(ctx)
+func (mth *modTidyHandle) Tidy(ctx context.Context, s source.Snapshot) ([]source.Error, error) {
+	v, err := mth.handle.Get(ctx, s.(*snapshot))
 	if err != nil {
 		return nil, err
 	}
@@ -65,8 +64,8 @@ func (mth *modTidyHandle) Tidy(ctx context.Context) ([]source.Error, error) {
 	return data.diagnostics, data.err
 }
 
-func (mth *modTidyHandle) TidiedContent(ctx context.Context) ([]byte, error) {
-	v, err := mth.handle.Get(ctx)
+func (mth *modTidyHandle) TidiedContent(ctx context.Context, s source.Snapshot) ([]byte, error) {
+	v, err := mth.handle.Get(ctx, s.(*snapshot))
 	if err != nil {
 		return nil, err
 	}
@@ -89,20 +88,9 @@ func (s *snapshot) ModTidyHandle(ctx context.Context) (source.ModTidyHandle, err
 	if err != nil {
 		return nil, err
 	}
-	wsPhs, err := s.WorkspacePackages(ctx)
-	if ctx.Err() != nil {
-		return nil, ctx.Err()
-	}
+	workspacePkgs, err := s.WorkspacePackages(ctx)
 	if err != nil {
 		return nil, err
-	}
-	var workspacePkgs []source.Package
-	for _, ph := range wsPhs {
-		pkg, err := ph.Check(ctx)
-		if err != nil {
-			return nil, err
-		}
-		workspacePkgs = append(workspacePkgs, pkg)
 	}
 	importHash, err := hashImports(ctx, workspacePkgs)
 	if err != nil {
@@ -117,7 +105,6 @@ func (s *snapshot) ModTidyHandle(ctx context.Context) (source.ModTidyHandle, err
 		modURI  = s.view.modURI
 		cfg     = s.config(ctx)
 		options = s.view.Options()
-		fset    = s.view.session.cache.fset
 	)
 	key := modTidyKey{
 		sessionID:       s.view.session.id,
@@ -127,11 +114,12 @@ func (s *snapshot) ModTidyHandle(ctx context.Context) (source.ModTidyHandle, err
 		gomod:           pmh.Mod().Identity().String(),
 		cfg:             hashConfig(cfg),
 	}
-	h := s.view.session.cache.store.Bind(key, func(ctx context.Context) interface{} {
+	h := s.view.session.cache.store.Bind(key, func(ctx context.Context, arg memoize.Arg) interface{} {
 		ctx, done := event.Start(ctx, "cache.ModTidyHandle", tag.URI.Of(modURI))
 		defer done()
 
-		original, m, parseErrors, err := pmh.Parse(ctx)
+		snapshot := arg.(*snapshot)
+		original, m, parseErrors, err := pmh.Parse(ctx, snapshot)
 		if err != nil || len(parseErrors) > 0 {
 			return &modTidyData{
 				diagnostics: parseErrors,
@@ -191,7 +179,7 @@ func (s *snapshot) ModTidyHandle(ctx context.Context) (source.ModTidyHandle, err
 		// go.mod file. The fixes will be for the go.mod file, but the
 		// diagnostics should appear on the import statements in the Go or
 		// go.mod files.
-		missingModuleErrs, err := missingModuleErrors(ctx, fset, m, workspacePkgs, ideal.Require, missingDeps, original, options)
+		missingModuleErrs, err := missingModuleErrors(ctx, snapshot, m, workspacePkgs, ideal.Require, missingDeps, original, options)
 		if err != nil {
 			return &modTidyData{err: err}
 		}
@@ -430,7 +418,7 @@ func rangeFromPositions(m *protocol.ColumnMapper, s, e modfile.Position) (protoc
 
 // missingModuleErrors returns diagnostics for each file in each workspace
 // package that has dependencies that are not reflected in the go.mod file.
-func missingModuleErrors(ctx context.Context, fset *token.FileSet, modMapper *protocol.ColumnMapper, pkgs []source.Package, modules []*modfile.Require, missingMods map[string]*modfile.Require, original *modfile.File, options source.Options) ([]source.Error, error) {
+func missingModuleErrors(ctx context.Context, snapshot *snapshot, modMapper *protocol.ColumnMapper, pkgs []source.Package, modules []*modfile.Require, missingMods map[string]*modfile.Require, original *modfile.File, options source.Options) ([]source.Error, error) {
 	var moduleErrs []source.Error
 	matchedMissingMods := make(map[*modfile.Require]struct{})
 	for _, pkg := range pkgs {
@@ -462,7 +450,7 @@ func missingModuleErrors(ctx context.Context, fset *token.FileSet, modMapper *pr
 			}
 		}
 		if len(missingPkgs) > 0 {
-			errs, err := missingModules(ctx, fset, modMapper, pkg, missingPkgs, options)
+			errs, err := missingModules(ctx, snapshot, modMapper, pkg, missingPkgs, options)
 			if err != nil {
 				return nil, err
 			}
@@ -499,15 +487,11 @@ func missingModuleErrors(ctx context.Context, fset *token.FileSet, modMapper *pr
 	return moduleErrs, nil
 }
 
-func missingModules(ctx context.Context, fset *token.FileSet, modMapper *protocol.ColumnMapper, pkg source.Package, missing map[string]*modfile.Require, options source.Options) ([]source.Error, error) {
+func missingModules(ctx context.Context, snapshot *snapshot, modMapper *protocol.ColumnMapper, pkg source.Package, missing map[string]*modfile.Require, options source.Options) ([]source.Error, error) {
 	var errors []source.Error
-	for _, pgh := range pkg.CompiledGoFiles() {
-		file, _, m, _, err := pgh.Parse(ctx)
-		if err != nil {
-			return nil, err
-		}
+	for _, pgf := range pkg.CompiledGoFiles() {
 		imports := make(map[string]*ast.ImportSpec)
-		for _, imp := range file.Imports {
+		for _, imp := range pgf.File.Imports {
 			if imp.Path == nil {
 				continue
 			}
@@ -526,11 +510,11 @@ func missingModules(ctx context.Context, fset *token.FileSet, modMapper *protoco
 			if !ok {
 				continue
 			}
-			spn, err := span.NewRange(fset, imp.Path.Pos(), imp.Path.End()).Span()
+			spn, err := span.NewRange(snapshot.view.session.cache.fset, imp.Path.Pos(), imp.Path.End()).Span()
 			if err != nil {
 				return nil, err
 			}
-			rng, err := m.Range(spn)
+			rng, err := pgf.Mapper.Range(spn)
 			if err != nil {
 				return nil, err
 			}
@@ -539,7 +523,7 @@ func missingModules(ctx context.Context, fset *token.FileSet, modMapper *protoco
 				return nil, err
 			}
 			errors = append(errors, source.Error{
-				URI:      pgh.File().URI(),
+				URI:      pgf.URI,
 				Range:    rng,
 				Message:  fmt.Sprintf("%s is not in your go.mod file", req.Mod.Path),
 				Category: "go mod tidy",

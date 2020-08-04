@@ -92,8 +92,7 @@ type Server struct {
 
 // sentDiagnostics is used to cache diagnostics that have been sent for a given file.
 type sentDiagnostics struct {
-	version      float64
-	identifier   string
+	id           source.VersionedFileIdentity
 	sorted       []*source.Diagnostic
 	withAnalysis bool
 	snapshotID   uint64
@@ -103,7 +102,8 @@ func (s *Server) nonstandardRequest(ctx context.Context, method string, params i
 	paramMap := params.(map[string]interface{})
 	if method == "gopls/diagnoseFiles" {
 		for _, file := range paramMap["files"].([]interface{}) {
-			snapshot, fh, ok, err := s.beginFileRequest(ctx, protocol.DocumentURI(file.(string)), source.UnknownKind)
+			snapshot, fh, ok, release, err := s.beginFileRequest(ctx, protocol.DocumentURI(file.(string)), source.UnknownKind)
+			defer release()
 			if !ok {
 				return nil, err
 			}

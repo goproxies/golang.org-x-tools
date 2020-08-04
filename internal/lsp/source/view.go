@@ -32,11 +32,11 @@ type Snapshot interface {
 
 	// FindFile returns the FileHandle for the given URI, if it is already
 	// in the given snapshot.
-	FindFile(uri span.URI) FileHandle
+	FindFile(uri span.URI) VersionedFileHandle
 
 	// GetFile returns the FileHandle for a given URI, initializing it
 	// if it is not already part of the snapshot.
-	GetFile(ctx context.Context, uri span.URI) (FileHandle, error)
+	GetFile(ctx context.Context, uri span.URI) (VersionedFileHandle, error)
 
 	// IsOpen returns whether the editor currently has a file open.
 	IsOpen(uri span.URI) bool
@@ -86,6 +86,9 @@ type Snapshot interface {
 	// ModTidy returns the results of `go mod tidy` for the snapshot's module.
 	ModTidy(ctx context.Context) (*TidiedModule, error)
 
+	// BuiltinPackage returns information about the special builtin package.
+	BuiltinPackage(ctx context.Context) (*BuiltinPackage, error)
+
 	// PackagesForFile returns the packages that this file belongs to.
 	PackagesForFile(ctx context.Context, uri span.URI) ([]Package, error)
 
@@ -122,9 +125,6 @@ type View interface {
 	// ModFile is the go.mod file at the root of this view. It may not exist.
 	ModFile() span.URI
 
-	// BuiltinPackage returns the go/ast.Object for the given name in the builtin package.
-	BuiltinPackage(ctx context.Context) (BuiltinPackage, error)
-
 	// BackgroundContext returns a context used for all background processing
 	// on behalf of this view.
 	BackgroundContext() context.Context
@@ -149,10 +149,10 @@ type View interface {
 	SetOptions(context.Context, Options) (View, error)
 
 	// Snapshot returns the current snapshot for the view.
-	Snapshot() Snapshot
+	Snapshot() (Snapshot, func())
 
 	// Rebuild rebuilds the current view, replacing the original view in its session.
-	Rebuild(ctx context.Context) (Snapshot, error)
+	Rebuild(ctx context.Context) (Snapshot, func(), error)
 
 	// InvalidBuildConfiguration returns true if there is some error in the
 	// user's workspace. In particular, if they are both outside of a module
@@ -172,9 +172,9 @@ type View interface {
 	WorkspaceDirectories(ctx context.Context) ([]string, error)
 }
 
-type BuiltinPackage interface {
-	Package() *ast.Package
-	ParsedFile() *ParsedGoFile
+type BuiltinPackage struct {
+	Package    *ast.Package
+	ParsedFile *ParsedGoFile
 }
 
 // A ParsedGoFile contains the results of parsing a Go file.
@@ -218,8 +218,8 @@ type TidiedModule struct {
 // of the client.
 // A session may have many active views at any given time.
 type Session interface {
-	// NewView creates a new View and returns it.
-	NewView(ctx context.Context, name string, folder span.URI, options Options) (View, Snapshot, error)
+	// NewView creates a new View, returning it and its first snapshot.
+	NewView(ctx context.Context, name string, folder span.URI, options Options) (View, Snapshot, func(), error)
 
 	// Cache returns the cache that created this session.
 	Cache() Cache
@@ -241,7 +241,7 @@ type Session interface {
 
 	// DidModifyFile reports a file modification to the session.
 	// It returns the resulting snapshots, a guaranteed one per view.
-	DidModifyFiles(ctx context.Context, changes []FileModification) ([]Snapshot, error)
+	DidModifyFiles(ctx context.Context, changes []FileModification) ([]Snapshot, []func(), []span.URI, error)
 
 	// Overlays returns a slice of file overlays for the session.
 	Overlays() []Overlay
@@ -255,17 +255,10 @@ type Session interface {
 
 // Overlay is the type for a file held in memory on a session.
 type Overlay interface {
-	// Session returns the session this overlay belongs to.
-	Session() Session
-
-	// Identity returns the FileIdentity for the overlay.
-	Identity() FileIdentity
+	VersionedFileHandle
 
 	// Saved returns whether this overlay has been saved to disk.
 	Saved() bool
-
-	// Data is the contents of the overlay held in memory.
-	Data() []byte
 }
 
 // FileModification represents a modification to a file.
@@ -357,17 +350,35 @@ const (
 	ParseFull
 )
 
+type VersionedFileHandle interface {
+	FileHandle
+	Version() float64
+	Session() string
+
+	// LSPIdentity returns the version identity of a file.
+	VersionedFileIdentity() VersionedFileIdentity
+}
+
+type VersionedFileIdentity struct {
+	URI span.URI
+
+	// SessionID is the ID of the LSP session.
+	SessionID string
+
+	// Version is the version of the file, as specified by the client. It should
+	// only be set in combination with SessionID.
+	Version float64
+}
+
 // FileHandle represents a handle to a specific version of a single file.
 type FileHandle interface {
 	URI() span.URI
 	Kind() FileKind
-	Version() float64
 
 	// Identity returns a FileIdentity for the file, even if there was an error
 	// reading it.
 	// It is a fatal error to call Identity on a file that has not yet been read.
-	Identity() FileIdentity
-
+	FileIdentity() FileIdentity
 	// Read reads the contents of a file.
 	// If the file is not available, returns a nil slice and an error.
 	Read() ([]byte, error)
@@ -377,25 +388,11 @@ type FileHandle interface {
 type FileIdentity struct {
 	URI span.URI
 
-	// SessionID is the ID of the LSP session.
-	SessionID string
-
-	// Version is the version of the file, as specified by the client. It should
-	// only be set in combination with SessionID.
-	Version float64
-
-	// Identifier represents a unique identifier for the file.
-	// It could be a file's modification time or its SHA1 hash if it is not on disk.
-	Identifier string
+	// Identifier represents a unique identifier for the file's content.
+	Hash string
 
 	// Kind is the file's kind.
 	Kind FileKind
-}
-
-func (fileID FileIdentity) String() string {
-	// Version is not part of the FileIdentity string,
-	// as it can remain change even if the file does not.
-	return fmt.Sprintf("%s%s%s", fileID.URI, fileID.Identifier, fileID.Kind)
 }
 
 // FileKind describes the kind of the file in question.
@@ -436,8 +433,8 @@ type Analyzer struct {
 	FixesError func(msg string) bool
 }
 
-func (a Analyzer) Enabled(snapshot Snapshot) bool {
-	if enabled, ok := snapshot.View().Options().UserEnabledAnalyses[a.Analyzer.Name]; ok {
+func (a Analyzer) Enabled(view View) bool {
+	if enabled, ok := view.Options().UserEnabledAnalyses[a.Analyzer.Name]; ok {
 		return enabled
 	}
 	return a.enabled

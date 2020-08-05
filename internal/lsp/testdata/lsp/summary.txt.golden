@@ -1,6 +1,6 @@
 -- summary --
 CodeLensCount = 4
-CompletionsCount = 244
+CompletionsCount = 245
 CompletionSnippetCount = 80
 UnimportedCompletionsCount = 6
 DeepCompletionsCount = 5
@@ -17,7 +17,7 @@ DefinitionsCount = 63
 TypeDefinitionsCount = 2
 HighlightsCount = 69
 ReferencesCount = 11
-RenamesCount = 28
+RenamesCount = 29
 PrepareRenamesCount = 7
 SymbolsCount = 3
 WorkspaceSymbolsCount = 2

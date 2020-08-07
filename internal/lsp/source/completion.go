@@ -340,9 +340,11 @@ func (c *completer) found(ctx context.Context, cand candidate) {
 		}
 	}
 
-	// Lower score of function calls so we prefer fields and vars over calls.
+	// Lower score of method calls so we prefer fields and vars over calls.
 	if cand.expandFuncCall {
-		cand.score *= 0.9
+		if sig, ok := obj.Type().Underlying().(*types.Signature); ok && sig.Recv() != nil {
+			cand.score *= 0.9
+		}
 	}
 
 	// Prefer private objects over public ones.
@@ -701,7 +703,6 @@ func (c *completer) emptySwitchStmt() bool {
 // populateCommentCompletions yields completions for exported
 // symbols immediately preceding comment.
 func (c *completer) populateCommentCompletions(ctx context.Context, comment *ast.CommentGroup) {
-
 	// Using the comment position find the line after
 	file := c.snapshot.FileSet().File(comment.End())
 	if file == nil {
@@ -1107,11 +1108,6 @@ func (c *completer) lexical(ctx context.Context) error {
 	}
 
 	if t := c.inference.objType; t != nil {
-		// Use variadic element type if we are completing variadic position.
-		if c.inference.variadicType != nil {
-			t = c.inference.variadicType
-		}
-
 		t = deref(t)
 
 		// If we have an expected type and it is _not_ a named type, see
@@ -1515,6 +1511,7 @@ const (
 	kindMap
 	kindStruct
 	kindString
+	kindFunc
 )
 
 // candidateInference holds information we have inferred about a type that can be
@@ -1526,10 +1523,11 @@ type candidateInference struct {
 	// objKind is a mask of expected kinds of types such as "map", "slice", etc.
 	objKind objKind
 
-	// variadicType is the scalar variadic element type. For example,
-	// when completing "append([]T{}, <>)" objType is []T and
-	// variadicType is T.
-	variadicType types.Type
+	// variadic is true if we are completing the initial variadic
+	// parameter. For example:
+	//   append([]T{}, <>)      // objType=T variadic=true
+	//   append([]T{}, T{}, <>) // objType=T variadic=false
+	variadic bool
 
 	// modifiers are prefixes such as "*", "&" or "<-" that influence how
 	// a candidate type relates to the expected type.
@@ -1599,7 +1597,14 @@ Nodes:
 				e = node.Y
 			}
 			if tv, ok := c.pkg.GetTypesInfo().Types[e]; ok {
-				inf.objType = tv.Type
+				switch node.Op {
+				case token.LAND, token.LOR:
+					// Don't infer "bool" type for "&&" or "||". Often you want
+					// to compose a boolean expression from non-boolean
+					// candidates.
+				default:
+					inf.objType = tv.Type
+				}
 				break Nodes
 			}
 		case *ast.AssignStmt:
@@ -1635,7 +1640,7 @@ Nodes:
 			return inf
 		case *ast.CallExpr:
 			// Only consider CallExpr args if position falls between parens.
-			if node.Lparen <= c.pos && c.pos <= node.Rparen {
+			if node.Lparen < c.pos && c.pos <= node.Rparen {
 				// For type conversions like "int64(foo)" we can only infer our
 				// desired type is convertible to int64.
 				if typ := typeConversion(node, c.pkg.GetTypesInfo()); typ != nil {
@@ -1650,18 +1655,14 @@ Nodes:
 							return inf
 						}
 
-						var (
-							exprIdx         = exprAtPos(c.pos, node.Args)
-							isLastParam     = exprIdx == numParams-1
-							beyondLastParam = exprIdx >= numParams
-						)
+						exprIdx := exprAtPos(c.pos, node.Args)
 
 						// If we have one or zero arg expressions, we may be
 						// completing to a function call that returns multiple
 						// values, in turn getting passed in to the surrounding
 						// call. Record the assignees so we can favor function
 						// calls that return matching values.
-						if len(node.Args) <= 1 {
+						if len(node.Args) <= 1 && exprIdx == 0 {
 							for i := 0; i < sig.Params().Len(); i++ {
 								inf.assignees = append(inf.assignees, sig.Params().At(i).Type())
 							}
@@ -1670,30 +1671,18 @@ Nodes:
 							inf.variadicAssignees = sig.Variadic()
 						}
 
-						if sig.Variadic() {
-							variadicType := deslice(sig.Params().At(numParams - 1).Type())
-
-							// If we are beyond the last param or we are the last
-							// param w/ further expressions, we expect a single
-							// variadic item.
-							if beyondLastParam || isLastParam && len(node.Args) > numParams {
-								inf.objType = variadicType
-								break Nodes
-							}
-
-							// Otherwise if we are at the last param then we are
-							// completing the variadic positition (i.e. we expect a
-							// slice type []T or an individual item T).
-							if isLastParam {
-								inf.variadicType = variadicType
-							}
-						}
-
 						// Make sure not to run past the end of expected parameters.
-						if beyondLastParam {
+						if exprIdx >= numParams {
 							inf.objType = sig.Params().At(numParams - 1).Type()
 						} else {
 							inf.objType = sig.Params().At(exprIdx).Type()
+						}
+
+						if sig.Variadic() && exprIdx >= (numParams-1) {
+							// If we are completing a variadic param, deslice the variadic type.
+							inf.objType = deslice(inf.objType)
+							// Record whether we are completing the initial variadic param.
+							inf.variadic = exprIdx == numParams-1 && len(node.Args) <= numParams
 						}
 					}
 				}
@@ -1721,8 +1710,9 @@ Nodes:
 						continue Nodes
 					}
 				}
+
+				return inf
 			}
-			return inf
 		case *ast.ReturnStmt:
 			if c.enclosingFunc != nil {
 				sig := c.enclosingFunc.sig
@@ -1787,6 +1777,9 @@ Nodes:
 			case token.ARROW:
 				inf.modifiers = append(inf.modifiers, typeModifier{mod: chanRead})
 			}
+		case *ast.DeferStmt, *ast.GoStmt:
+			inf.objKind |= kindFunc
+			return inf
 		default:
 			if breaksExpectedTypeInference(node) {
 				return inf
@@ -1850,7 +1843,7 @@ func (ci candidateInference) applyTypeNameModifiers(typ types.Type) types.Type {
 // matchesVariadic returns true if we are completing a variadic
 // parameter and candType is a compatible slice type.
 func (ci candidateInference) matchesVariadic(candType types.Type) bool {
-	return ci.variadicType != nil && types.AssignableTo(candType, ci.objType)
+	return ci.variadic && ci.objType != nil && types.AssignableTo(candType, types.NewSlice(ci.objType))
 }
 
 // findSwitchStmt returns an *ast.CaseClause's corresponding *ast.SwitchStmt or
@@ -2117,9 +2110,9 @@ func (ci *candidateInference) candTypeMatches(cand *candidate) bool {
 	expTypes := make([]types.Type, 0, 2)
 	if ci.objType != nil {
 		expTypes = append(expTypes, ci.objType)
-	}
-	if ci.variadicType != nil {
-		expTypes = append(expTypes, ci.variadicType)
+		if ci.variadic {
+			expTypes = append(expTypes, types.NewSlice(ci.objType))
+		}
 	}
 
 	return cand.anyCandType(func(candType types.Type, addressable bool) bool {
@@ -2149,7 +2142,12 @@ func (ci *candidateInference) candTypeMatches(cand *candidate) bool {
 
 			// If we have no expected type, fall back to checking the
 			// expected "kind" of object, if available.
-			return ci.kindMatches(candType)
+			if ci.kindMatches(candType) {
+				if ci.objKind == kindFunc {
+					cand.expandFuncCall = true
+				}
+				return true
+			}
 		}
 
 		for _, expType := range expTypes {
@@ -2338,6 +2336,8 @@ func candKind(candType types.Type) objKind {
 		if t.Info()&types.IsString > 0 {
 			return kindString
 		}
+	case *types.Signature:
+		return kindFunc
 	}
 
 	return 0

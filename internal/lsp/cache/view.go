@@ -126,9 +126,10 @@ type View struct {
 	// Only possible with Go versions 1.14 and above.
 	tmpMod bool
 
-	// goCommand indicates if the user is using the go command or some other
-	// build system.
-	goCommand bool
+	// hasGopackagesDriver is true if the user has a value set for the
+	// GOPACKAGESDRIVER environment variable or a gopackagesdriver binary on
+	// their machine.
+	hasGopackagesDriver bool
 
 	// `go env` variables that need to be tracked by gopls.
 	gocache, gomodcache, gopath, goprivate string
@@ -742,12 +743,12 @@ func (v *View) maybeReinitialize() {
 	v.initializeOnce = &once
 }
 
-func (v *View) setBuildInformation(ctx context.Context, folder span.URI, env []string, modfileFlagEnabled bool) error {
+func (v *View) setBuildInformation(ctx context.Context, folder span.URI, options source.Options) error {
 	if err := checkPathCase(folder.Filename()); err != nil {
 		return fmt.Errorf("invalid workspace configuration: %w", err)
 	}
 	// Make sure to get the `go env` before continuing with initialization.
-	modFile, err := v.setGoEnv(ctx, env)
+	modFile, err := v.setGoEnv(ctx, options.Env)
 	if err != nil {
 		return err
 	}
@@ -762,7 +763,7 @@ func (v *View) setBuildInformation(ctx context.Context, folder span.URI, env []s
 	}
 
 	v.root = v.folder
-	if v.modURI != "" {
+	if options.ExpandWorkspaceToModule && v.modURI != "" {
 		v.root = span.URIFromPath(filepath.Dir(v.modURI.Filename()))
 	}
 
@@ -771,7 +772,7 @@ func (v *View) setBuildInformation(ctx context.Context, folder span.URI, env []s
 	v.setBuildConfiguration()
 
 	// The user has disabled the use of the -modfile flag or has no go.mod file.
-	if !modfileFlagEnabled || v.modURI == "" {
+	if !options.TempModfile || v.modURI == "" {
 		return nil
 	}
 	if modfileFlag, err := v.modfileFlagExists(ctx, v.Options().Env); err != nil {
@@ -793,9 +794,9 @@ func (v *View) setBuildConfiguration() (isValid bool) {
 	defer func() {
 		v.hasValidBuildConfiguration = isValid
 	}()
-	// Since we only really understand the `go` command, if the user is not
-	// using the go command, assume that their configuration is valid.
-	if !v.goCommand {
+	// Since we only really understand the `go` command, if the user has a
+	// different GOPACKAGESDRIVER, assume that their configuration is valid.
+	if v.hasGopackagesDriver {
 		return true
 	}
 	// Check if the user is working within a module.
@@ -860,11 +861,17 @@ func (v *View) setGoEnv(ctx context.Context, configEnv []string) (string, error)
 	}
 
 	// The value of GOPACKAGESDRIVER is not returned through the go command.
+	gopackagesdriver := os.Getenv("GOPACKAGESDRIVER")
+	for _, s := range configEnv {
+		split := strings.SplitN(s, "=", 2)
+		if split[0] == "GOPACKAGESDRIVER" {
+			gopackagesdriver = split[1]
+		}
+	}
 	// A user may also have a gopackagesdriver binary on their machine, which
 	// works the same way as setting GOPACKAGESDRIVER.
-	gopackagesdriver := os.Getenv("GOPACKAGESDRIVER")
 	tool, _ := exec.LookPath("gopackagesdriver")
-	v.goCommand = gopackagesdriver == "off" || (gopackagesdriver == "" && tool == "")
+	v.hasGopackagesDriver = gopackagesdriver != "off" && (gopackagesdriver != "" || tool != "")
 	return gomod, nil
 }
 

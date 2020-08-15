@@ -488,7 +488,7 @@ func (s *snapshot) KnownPackages(ctx context.Context) ([]source.Package, error) 
 func (s *snapshot) CachedImportPaths(ctx context.Context) (map[string]source.Package, error) {
 	// Don't reload workspace package metadata.
 	// This function is meant to only return currently cached information.
-	s.view.awaitInitialized(ctx)
+	s.view.AwaitInitialized(ctx)
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -667,7 +667,7 @@ func (s *snapshot) IsSaved(uri span.URI) bool {
 
 func (s *snapshot) awaitLoaded(ctx context.Context) error {
 	// Do not return results until the snapshot's view has been initialized.
-	s.view.awaitInitialized(ctx)
+	s.view.AwaitInitialized(ctx)
 
 	if err := s.reloadWorkspace(ctx); err != nil {
 		return err
@@ -696,20 +696,24 @@ func (s *snapshot) reloadWorkspace(ctx context.Context) error {
 
 	// See which of the workspace packages are missing metadata.
 	s.mu.Lock()
-	var pkgPaths []interface{}
+	pkgPathSet := map[packagePath]struct{}{}
 	for id, pkgPath := range s.workspacePackages {
 		// Don't try to reload "command-line-arguments" directly.
 		if pkgPath == "command-line-arguments" {
 			continue
 		}
 		if s.metadata[id] == nil {
-			pkgPaths = append(pkgPaths, pkgPath)
+			pkgPathSet[pkgPath] = struct{}{}
 		}
 	}
 	s.mu.Unlock()
 
-	if len(pkgPaths) == 0 {
+	if len(pkgPathSet) == 0 {
 		return nil
+	}
+	var pkgPaths []interface{}
+	for pkgPath := range pkgPathSet {
+		pkgPaths = append(pkgPaths, pkgPath)
 	}
 	return s.load(ctx, pkgPaths...)
 }
@@ -1157,7 +1161,7 @@ func (s *snapshot) findWorkspaceDirectories(ctx context.Context, modFH source.Fi
 }
 
 func (s *snapshot) BuiltinPackage(ctx context.Context) (*source.BuiltinPackage, error) {
-	s.view.awaitInitialized(ctx)
+	s.view.AwaitInitialized(ctx)
 
 	if s.builtin == nil {
 		return nil, errors.Errorf("no builtin package for view %s", s.view.name)

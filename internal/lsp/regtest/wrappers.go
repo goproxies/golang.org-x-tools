@@ -5,12 +5,12 @@
 package regtest
 
 import (
-	"errors"
 	"io"
 	"testing"
 
 	"golang.org/x/tools/internal/lsp/fake"
 	"golang.org/x/tools/internal/lsp/protocol"
+	errors "golang.org/x/xerrors"
 )
 
 func (e *Env) ChangeFilesOnDisk(events []fake.FileEvent) {
@@ -244,8 +244,8 @@ func (e *Env) CodeLens(path string) []protocol.CodeLens {
 	return lens
 }
 
-// ReferencesAtRegexp calls textDocument/references for the given path at the
-// position of the given regexp.
+// References calls textDocument/references for the given path at the given
+// position.
 func (e *Env) References(path string, pos fake.Pos) []protocol.Location {
 	e.T.Helper()
 	locations, err := e.Editor.References(e.Ctx, path, pos)

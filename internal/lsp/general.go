@@ -22,13 +22,14 @@ import (
 	"golang.org/x/tools/internal/lsp/protocol"
 	"golang.org/x/tools/internal/lsp/source"
 	"golang.org/x/tools/internal/span"
+	errors "golang.org/x/xerrors"
 )
 
 func (s *Server) initialize(ctx context.Context, params *protocol.ParamInitialize) (*protocol.InitializeResult, error) {
 	s.stateMu.Lock()
 	if s.state >= serverInitializing {
 		defer s.stateMu.Unlock()
-		return nil, fmt.Errorf("%w: initialize called while server in %v state", jsonrpc2.ErrInvalidRequest, s.state)
+		return nil, errors.Errorf("%w: initialize called while server in %v state", jsonrpc2.ErrInvalidRequest, s.state)
 	}
 	s.state = serverInitializing
 	s.stateMu.Unlock()
@@ -142,7 +143,7 @@ func (s *Server) initialized(ctx context.Context, params *protocol.InitializedPa
 	s.stateMu.Lock()
 	if s.state >= serverInitialized {
 		defer s.stateMu.Unlock()
-		return fmt.Errorf("%w: initalized called while server in %v state", jsonrpc2.ErrInvalidRequest, s.state)
+		return errors.Errorf("%w: initalized called while server in %v state", jsonrpc2.ErrInvalidRequest, s.state)
 	}
 	s.state = serverInitialized
 	s.stateMu.Unlock()
@@ -417,14 +418,14 @@ func (s *Server) handleOptionResults(ctx context.Context, results source.OptionR
 		case source.OptionUnexpected:
 			if err := s.client.ShowMessage(ctx, &protocol.ShowMessageParams{
 				Type:    protocol.Error,
-				Message: fmt.Sprintf("unexpected config %s", result.Name),
+				Message: fmt.Sprintf("unexpected gopls setting %q", result.Name),
 			}); err != nil {
 				return err
 			}
 		case source.OptionDeprecated:
-			msg := fmt.Sprintf("config %s is deprecated", result.Name)
+			msg := fmt.Sprintf("gopls setting %q is deprecated", result.Name)
 			if result.Replacement != "" {
-				msg = fmt.Sprintf("%s, use %s instead", msg, result.Replacement)
+				msg = fmt.Sprintf("%s, use %q instead", msg, result.Replacement)
 			}
 			if err := s.client.ShowMessage(ctx, &protocol.ShowMessageParams{
 				Type:    protocol.Warning,

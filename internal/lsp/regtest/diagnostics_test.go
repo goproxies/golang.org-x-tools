@@ -276,7 +276,7 @@ func Hello() {
 			env.Await(
 				env.DiagnosticAtRegexp("main.go", `"mod.com/bob"`),
 			)
-			if err := env.Sandbox.RunGoCommand(env.Ctx, "mod", "init", "mod.com"); err != nil {
+			if err := env.Sandbox.RunGoCommand(env.Ctx, "", "mod", []string{"init", "mod.com"}); err != nil {
 				t.Fatal(err)
 			}
 			env.Await(
@@ -831,6 +831,64 @@ func TestHello(t *testing.T) {
 		env.SaveBuffer("hello/hello_x_test.go")
 		env.Await(
 			EmptyDiagnostics("hello/hello_x_test.go"),
+		)
+	})
+}
+
+// Reproduce golang/go#40690.
+func TestCreateOnlyXTest(t *testing.T) {
+	t.Skip("golang/go#40690 is not resolved yet.")
+
+	const mod = `
+	-- go.mod --
+	module mod.com
+	-- foo/foo.go --
+	package foo
+	-- foo/bar_test.go --
+	`
+	run(t, mod, func(t *testing.T, env *Env) {
+		env.Await(CompletedWork(lsp.DiagnosticWorkTitle(lsp.FromInitialWorkspaceLoad), 1))
+		env.OpenFile("foo/bar_test.go")
+		env.EditBuffer("foo/bar_test.go", fake.NewEdit(0, 0, 0, 0, `package foo
+	`))
+		env.Await(
+			CompletedWork(lsp.DiagnosticWorkTitle(lsp.FromDidChange), 1),
+		)
+		env.RegexpReplace("foo/bar_test.go", "package foo", "package foo_test")
+		env.Await(
+			OnceMet(
+				CompletedWork(lsp.DiagnosticWorkTitle(lsp.FromDidChange), 2),
+				NoErrorLogs(),
+			),
+		)
+	})
+}
+
+func TestChangePackageName(t *testing.T) {
+	t.Skip("This issue hasn't been fixed yet. See golang.org/issue/41061.")
+
+	const mod = `
+-- go.mod --
+module mod.com
+-- foo/foo.go --
+package foo
+-- foo/bar_test.go --
+package foo_
+`
+	run(t, mod, func(t *testing.T, env *Env) {
+		env.Await(CompletedWork(lsp.DiagnosticWorkTitle(lsp.FromInitialWorkspaceLoad), 1))
+		env.OpenFile("foo/bar_test.go")
+		env.RegexpReplace("foo/bar_test.go", "package foo_", "package foo_test")
+		env.SaveBuffer("foo/bar_test.go")
+		env.Await(
+			OnceMet(
+				CompletedWork(lsp.DiagnosticWorkTitle(lsp.FromDidSave), 1),
+				NoDiagnostics("foo/bar_test.go"),
+			),
+			OnceMet(
+				CompletedWork(lsp.DiagnosticWorkTitle(lsp.FromDidSave), 1),
+				NoDiagnostics("foo/foo.go"),
+			),
 		)
 	})
 }

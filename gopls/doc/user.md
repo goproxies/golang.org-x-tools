@@ -43,7 +43,9 @@ If you see this error:
 $ go get golang.org/x/tools/gopls@latest
 go: cannot use path@version syntax in GOPATH mode
 ```
+
 then run
+
 ```sh
 GO111MODULE=on go get golang.org/x/tools/gopls@latest
 ```
@@ -56,11 +58,19 @@ with `@master` could fail.  To actually update your `gopls` to the
 latest **unstable** version, use:
 
 ```sh
-$ go get golang.org/x/tools/gopls@master golang.org/x/tools@master
+go get golang.org/x/tools/gopls@master golang.org/x/tools@master
 ```
 
 In general, you should use `@latest` instead, to prevent frequent
 breakages.
+
+### Supported Go versions
+
+`gopls` follows the
+[Go Release Policy](https://golang.org/doc/devel/release.html#policy),
+meaning that it officially supports the last 2 major Go releases. We run CI to
+verify that the `gopls` tests pass for the last 4 major Go releases, but do not
+prioritize issues only affecting legacy Go release (3 or 4 releases ago).
 
 ## Configurations
 
@@ -104,6 +114,22 @@ See [Settings](settings.md) for more information about the available configurati
 #### Workspace folder configuration
 
 This contains exactly the same set of values that are in the global configuration, but it is fetched for every workspace folder separately. The editor can choose to respond with different values per-folder.
+
+## Special Features
+
+### Symbol Queries
+
+Gopls supports some extended syntax for `workspace/symbol` requests, when using
+the `fuzzy` symbol matcher (the default). Inspired by the popular fuzzy matcher
+[FZF](https://github.com/junegunn/fzf), the following special characters are
+supported within symbol queries:
+
+| Character | Usage     | Match        |
+| --------- | --------- | ------------ |
+| `'`       | `'abc`    | exact        |
+| `^`       | `^printf` | exact prefix |
+| `$`       | `printf$` | exact suffix |
+
 
 ## Command line support
 

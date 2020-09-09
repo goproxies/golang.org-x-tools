@@ -131,7 +131,7 @@ var (
 		Title:          "Extract to function",
 		suggestedFixFn: extractFunction,
 		appliesFn: func(fset *token.FileSet, rng span.Range, src []byte, file *ast.File, _ *types.Package, info *types.Info) bool {
-			_, _, _, _, _, ok, _ := canExtractFunction(fset, rng, src, file, info)
+			_, ok, _ := canExtractFunction(fset, rng, src, file, info)
 			return ok
 		},
 	}
@@ -208,7 +208,7 @@ func (c *Command) SuggestedFix(ctx context.Context, snapshot Snapshot, fh Versio
 // getAllSuggestedFixInputs is a helper function to collect all possible needed
 // inputs for an AppliesFunc or SuggestedFixFunc.
 func getAllSuggestedFixInputs(ctx context.Context, snapshot Snapshot, fh FileHandle, pRng protocol.Range) (*token.FileSet, span.Range, []byte, *ast.File, *protocol.ColumnMapper, *types.Package, *types.Info, error) {
-	pkg, pgf, err := getParsedFile(ctx, snapshot, fh, NarrowestPackage)
+	pkg, pgf, err := GetParsedFile(ctx, snapshot, fh, NarrowestPackage)
 	if err != nil {
 		return nil, span.Range{}, nil, nil, nil, nil, nil, errors.Errorf("getting file for Identifier: %w", err)
 	}

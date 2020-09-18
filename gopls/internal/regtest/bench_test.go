@@ -9,8 +9,6 @@ import (
 	"fmt"
 	"testing"
 
-	"golang.org/x/tools/internal/lsp"
-	"golang.org/x/tools/internal/lsp/fake"
 	"golang.org/x/tools/internal/lsp/protocol"
 )
 
@@ -32,9 +30,7 @@ func TestBenchmarkIWL(t *testing.T) {
 	b := testing.Benchmark(func(b *testing.B) {
 		for i := 0; i < b.N; i++ {
 			withOptions(opts...).run(t, "", func(t *testing.T, env *Env) {
-				env.Await(
-					CompletedWork(lsp.DiagnosticWorkTitle(lsp.FromInitialWorkspaceLoad), 1),
-				)
+				env.Await(InitialWorkspaceLoad)
 			})
 		}
 	})
@@ -59,14 +55,14 @@ func TestBenchmarkSymbols(t *testing.T) {
 		t.Skip("-symbol_workdir not configured")
 	}
 	opts := stressTestOptions(symbolBench.workdir)
-	conf := fake.EditorConfig{}
+	conf := EditorConfig{}
 	if symbolBench.matcher != "" {
 		conf.SymbolMatcher = &symbolBench.matcher
 	}
 	if symbolBench.style != "" {
 		conf.SymbolStyle = &symbolBench.style
 	}
-	opts = append(opts, WithEditorConfig(conf))
+	opts = append(opts, conf)
 	withOptions(opts...).run(t, "", func(t *testing.T, env *Env) {
 		// We can't Await in this test, since we have disabled hooks. Instead, run
 		// one symbol request to completion to ensure all necessary cache entries
@@ -80,7 +76,7 @@ func TestBenchmarkSymbols(t *testing.T) {
 		if symbolBench.printResults {
 			fmt.Println("Results:")
 			for i := 0; i < len(results); i++ {
-				fmt.Printf("\t%d. %s\n", i, results[i].Name)
+				fmt.Printf("\t%d. %s (%s)\n", i, results[i].Name, results[i].ContainerName)
 			}
 		}
 		b := testing.Benchmark(func(b *testing.B) {
@@ -125,9 +121,7 @@ func TestBenchmarkCompletion(t *testing.T) {
 	// it first (and therefore need hooks).
 	opts = append(opts, SkipHooks(false))
 	withOptions(opts...).run(t, "", func(t *testing.T, env *Env) {
-		env.Await(
-			CompletedWork(lsp.DiagnosticWorkTitle(lsp.FromInitialWorkspaceLoad), 1),
-		)
+		env.Await(InitialWorkspaceLoad)
 		env.OpenFile(completionBench.fileName)
 		params := &protocol.CompletionParams{}
 		params.Context.TriggerCharacter = "s"

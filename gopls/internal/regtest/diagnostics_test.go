@@ -259,13 +259,13 @@ func Hello() {
 			env.Await(
 				EmptyDiagnostics("main.go"),
 			)
-			metBy := env.Await(
-				env.DiagnosticAtRegexp("bob/bob.go", "x"),
+			var d protocol.PublishDiagnosticsParams
+			env.Await(
+				OnceMet(
+					env.DiagnosticAtRegexp("bob/bob.go", "x"),
+					ReadDiagnostics("bob/bob.go", &d),
+				),
 			)
-			d, ok := metBy[0].(*protocol.PublishDiagnosticsParams)
-			if !ok {
-				t.Fatalf("unexpected met by result %v (%T)", metBy, metBy)
-			}
 			if len(d.Diagnostics) != 1 {
 				t.Fatalf("expected 1 diagnostic, got %v", len(d.Diagnostics))
 			}
@@ -438,8 +438,8 @@ func _() {
 	fmt.Println("Hello World")
 }
 `
-	editorConfig := fake.EditorConfig{Env: map[string]string{"GOPATH": ""}}
-	withOptions(WithEditorConfig(editorConfig)).run(t, files, func(t *testing.T, env *Env) {
+	editorConfig := EditorConfig{Env: map[string]string{"GOPATH": ""}}
+	withOptions(editorConfig).run(t, files, func(t *testing.T, env *Env) {
 		env.OpenFile("main.go")
 		env.Await(env.DiagnosticAtRegexp("main.go", "fmt"))
 		env.SaveBuffer("main.go")
@@ -462,8 +462,8 @@ package x
 
 var X = 0
 `
-	editorConfig := fake.EditorConfig{Env: map[string]string{"GOFLAGS": "-tags=foo"}}
-	withOptions(WithEditorConfig(editorConfig)).run(t, files, func(t *testing.T, env *Env) {
+	editorConfig := EditorConfig{Env: map[string]string{"GOFLAGS": "-tags=foo"}}
+	withOptions(editorConfig).run(t, files, func(t *testing.T, env *Env) {
 		env.OpenFile("main.go")
 		env.OrganizeImports("main.go")
 		env.Await(EmptyDiagnostics("main.go"))
@@ -490,13 +490,13 @@ func _() {
 	runner.Run(t, generated, func(t *testing.T, env *Env) {
 		env.OpenFile("main.go")
 		original := env.ReadWorkspaceFile("main.go")
-		metBy := env.Await(
-			DiagnosticAt("main.go", 5, 8),
+		var d protocol.PublishDiagnosticsParams
+		env.Await(
+			OnceMet(
+				DiagnosticAt("main.go", 5, 8),
+				ReadDiagnostics("main.go", &d),
+			),
 		)
-		d, ok := metBy[0].(*protocol.PublishDiagnosticsParams)
-		if !ok {
-			t.Fatalf("unexpected met by result %v (%T)", metBy, metBy)
-		}
 		// Apply fixes and save the buffer.
 		env.ApplyQuickFixes("main.go", d.Diagnostics)
 		env.SaveBuffer("main.go")
@@ -556,9 +556,9 @@ hi mom
 `
 	for _, go111module := range []string{"on", "off", ""} {
 		t.Run(fmt.Sprintf("GO111MODULE_%v", go111module), func(t *testing.T) {
-			withOptions(WithEditorConfig(fake.EditorConfig{
+			withOptions(EditorConfig{
 				Env: map[string]string{"GO111MODULE": go111module},
-			})).run(t, files, func(t *testing.T, env *Env) {
+			}).run(t, files, func(t *testing.T, env *Env) {
 				env.OpenFile("hello.txt")
 				env.Await(
 					OnceMet(
@@ -642,18 +642,20 @@ func main() {
 	_ = conf.ErrHelpWanted
 }
 `
-	runner.Run(t, ardanLabs, func(t *testing.T, env *Env) {
+	withOptions(
+		WithProxyFiles(ardanLabsProxy),
+	).run(t, ardanLabs, func(t *testing.T, env *Env) {
 		// Expect a diagnostic with a suggested fix to add
 		// "github.com/ardanlabs/conf" to the go.mod file.
 		env.OpenFile("go.mod")
 		env.OpenFile("main.go")
-		metBy := env.Await(
-			env.DiagnosticAtRegexp("main.go", `"github.com/ardanlabs/conf"`),
+		var d protocol.PublishDiagnosticsParams
+		env.Await(
+			OnceMet(
+				env.DiagnosticAtRegexp("main.go", `"github.com/ardanlabs/conf"`),
+				ReadDiagnostics("main.go", &d),
+			),
 		)
-		d, ok := metBy[0].(*protocol.PublishDiagnosticsParams)
-		if !ok {
-			t.Fatalf("unexpected type for metBy (%T)", metBy)
-		}
 		env.ApplyQuickFixes("main.go", d.Diagnostics)
 		env.SaveBuffer("go.mod")
 		env.Await(
@@ -667,14 +669,13 @@ func main() {
 		)
 		env.SaveBuffer("main.go")
 		// Expect a diagnostic and fix to remove the dependency in the go.mod.
-		metBy = env.Await(
-			EmptyDiagnostics("main.go"),
-			env.DiagnosticAtRegexp("go.mod", "require github.com/ardanlabs/conf"),
+		env.Await(EmptyDiagnostics("main.go"))
+		env.Await(
+			OnceMet(
+				env.DiagnosticAtRegexp("go.mod", "require github.com/ardanlabs/conf"),
+				ReadDiagnostics("go.mod", &d),
+			),
 		)
-		d, ok = metBy[1].(*protocol.PublishDiagnosticsParams)
-		if !ok {
-			t.Fatalf("unexpected type for metBy (%T)", metBy)
-		}
 		env.ApplyQuickFixes("go.mod", d.Diagnostics)
 		env.SaveBuffer("go.mod")
 		env.Await(
@@ -686,7 +687,7 @@ func main() {
 		env.Await(
 			env.DiagnosticAtRegexp("main.go", `"github.com/ardanlabs/conf"`),
 		)
-	}, WithProxyFiles(ardanLabsProxy))
+	})
 }
 
 // Test for golang/go#38207.
@@ -699,7 +700,9 @@ module mod.com
 go 1.12
 -- main.go --
 `
-	runner.Run(t, emptyFile, func(t *testing.T, env *Env) {
+	withOptions(
+		WithProxyFiles(ardanLabsProxy),
+	).run(t, emptyFile, func(t *testing.T, env *Env) {
 		env.OpenFile("main.go")
 		env.OpenFile("go.mod")
 		env.EditBuffer("main.go", fake.NewEdit(0, 0, 0, 0, `package main
@@ -711,18 +714,18 @@ func main() {
 }
 `))
 		env.SaveBuffer("main.go")
-		metBy := env.Await(
-			env.DiagnosticAtRegexp("main.go", `"github.com/ardanlabs/conf"`),
+		var d protocol.PublishDiagnosticsParams
+		env.Await(
+			OnceMet(
+				env.DiagnosticAtRegexp("main.go", `"github.com/ardanlabs/conf"`),
+				ReadDiagnostics("main.go", &d),
+			),
 		)
-		d, ok := metBy[0].(*protocol.PublishDiagnosticsParams)
-		if !ok {
-			t.Fatalf("unexpected type for diagnostics (%T)", d)
-		}
 		env.ApplyQuickFixes("main.go", d.Diagnostics)
 		env.Await(
 			EmptyDiagnostics("main.go"),
 		)
-	}, WithProxyFiles(ardanLabsProxy))
+	})
 }
 
 // Test for golang/go#36960.
@@ -847,7 +850,7 @@ func TestCreateOnlyXTest(t *testing.T) {
 	-- foo/bar_test.go --
 	`
 	run(t, mod, func(t *testing.T, env *Env) {
-		env.Await(CompletedWork(lsp.DiagnosticWorkTitle(lsp.FromInitialWorkspaceLoad), 1))
+		env.Await(InitialWorkspaceLoad)
 		env.OpenFile("foo/bar_test.go")
 		env.EditBuffer("foo/bar_test.go", fake.NewEdit(0, 0, 0, 0, `package foo
 	`))
@@ -876,7 +879,7 @@ package foo
 package foo_
 `
 	run(t, mod, func(t *testing.T, env *Env) {
-		env.Await(CompletedWork(lsp.DiagnosticWorkTitle(lsp.FromInitialWorkspaceLoad), 1))
+		env.Await(InitialWorkspaceLoad)
 		env.OpenFile("foo/bar_test.go")
 		env.RegexpReplace("foo/bar_test.go", "package foo_", "package foo_test")
 		env.SaveBuffer("foo/bar_test.go")
@@ -1101,9 +1104,7 @@ func Foo() {
 	runner.Run(t, basic, func(t *testing.T, env *Env) {
 		testenv.NeedsGo1Point(t, 15)
 
-		env.Await(
-			CompletedWork(lsp.DiagnosticWorkTitle(lsp.FromInitialWorkspaceLoad), 1),
-		)
+		env.Await(InitialWorkspaceLoad)
 		env.WriteWorkspaceFile("foo/foo_test.go", `package main
 
 func main() {
@@ -1132,9 +1133,7 @@ package main
 func main() {}
 `
 	runner.Run(t, basic, func(t *testing.T, env *Env) {
-		env.Await(
-			CompletedWork(lsp.DiagnosticWorkTitle(lsp.FromInitialWorkspaceLoad), 1),
-		)
+		env.Await(InitialWorkspaceLoad)
 		env.Editor.OpenFileWithContent(env.Ctx, "foo.go", `package main`)
 		env.Await(
 			CompletedWork(lsp.DiagnosticWorkTitle(lsp.FromDidOpen), 1),
@@ -1267,7 +1266,7 @@ func main() {
 `
 
 	withOptions(
-		WithEditorConfig(fake.EditorConfig{EnableStaticcheck: true}),
+		EditorConfig{EnableStaticcheck: true},
 	).run(t, files, func(t *testing.T, env *Env) {
 		env.OpenFile("main.go")
 		// Staticcheck should generate a diagnostic to simplify this literal.
@@ -1293,7 +1292,7 @@ func main() {}
 		log.SetFlags(log.Lshortfile)
 		env.OpenFile("main.go")
 		env.OpenFile("other.go")
-		env.Await(CompletedWork(lsp.DiagnosticWorkTitle(lsp.FromInitialWorkspaceLoad), 1))
+		env.Await(InitialWorkspaceLoad)
 		x := env.DiagnosticsFor("main.go")
 		if x == nil {
 			t.Fatalf("expected 1 diagnostic, got none")
@@ -1342,9 +1341,7 @@ func _() {
 }
 `
 	run(t, files, func(t *testing.T, env *Env) {
-		env.Await(
-			CompletedWork(lsp.DiagnosticWorkTitle(lsp.FromInitialWorkspaceLoad), 1),
-		)
+		env.Await(InitialWorkspaceLoad)
 		env.OpenFile("a/a.go")
 		env.Await(
 			env.DiagnosticAtRegexp("a/a.go", "x"),

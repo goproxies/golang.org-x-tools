@@ -166,10 +166,14 @@ func (s *Session) createView(ctx context.Context, name string, folder span.URI, 
 		return nil, nil, func() {}, err
 	}
 
-	// Find all of the modules in the workspace.
-	modules, err := findWorkspaceModules(ctx, ws.rootURI, options)
-	if err != nil {
-		return nil, nil, func() {}, err
+	// If workspace module mode is enabled, find all of the modules in the
+	// workspace.
+	var modules map[span.URI]*moduleRoot
+	if options.ExperimentalWorkspaceModule {
+		modules, err = findWorkspaceModules(ctx, ws.rootURI, options)
+		if err != nil {
+			return nil, nil, func() {}, err
+		}
 	}
 
 	// Now that we have set all required fields,
@@ -256,8 +260,8 @@ func findWorkspaceModules(ctx context.Context, root span.URI, options *source.Op
 	// Walk the view's folder to find all modules in the view.
 	modules := make(map[span.URI]*moduleRoot)
 	return modules, filepath.Walk(root.Filename(), func(path string, info os.FileInfo, err error) error {
-		// Ignore any errors we may encounter while visiting files.
 		if err != nil {
+			// Probably a permission error. Keep looking.
 			return filepath.SkipDir
 		}
 		// For any path that is not the workspace folder, check if the path

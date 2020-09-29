@@ -215,7 +215,7 @@ func (s *Server) didModifyFiles(ctx context.Context, modifications []source.File
 		for _, s := range snapshots {
 			if s.View() == view {
 				if snapshot != nil {
-					return errors.Errorf("duplicate snapshots for the same view")
+					return errors.New("duplicate snapshots for the same view")
 				}
 				snapshot = s
 			}
@@ -254,7 +254,7 @@ func (s *Server) didModifyFiles(ctx context.Context, modifications []source.File
 		// If a modification comes in for the view's go.mod file and the view
 		// was never properly initialized, or the view does not have
 		// a go.mod file, try to recreate the associated view.
-		if len(snapshot.View().ModFiles()) == 0 {
+		if len(snapshot.ModFiles()) == 0 {
 			for _, uri := range uris {
 				// Don't rebuild the view until the go.mod is on disk.
 				if !snapshot.IsSaved(uri) {

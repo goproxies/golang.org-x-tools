@@ -597,28 +597,25 @@ func (s *snapshot) CachedImportPaths(ctx context.Context) (map[string]source.Pac
 	return results, nil
 }
 
-func (s *snapshot) GoModForFile(ctx context.Context, fh source.FileHandle) (source.VersionedFileHandle, error) {
-	if fh.Kind() != source.Go {
-		return nil, fmt.Errorf("expected Go file, got %s", fh.Kind())
-	}
+func (s *snapshot) GoModForFile(ctx context.Context, uri span.URI) (span.URI, error) {
 	if len(s.modules) == 0 {
 		if s.view.modURI == "" {
-			return nil, errors.New("no modules in this view")
+			return "", errors.New("no modules in this view")
 		}
-		return s.GetFile(ctx, s.view.modURI)
+		return s.view.modURI, nil
 	}
 	var match span.URI
 	for _, m := range s.modules {
 		// Add an os.PathSeparator to the end of each directory to make sure
 		// that foo/apple/banana does not match foo/a.
-		if !strings.HasPrefix(fh.URI().Filename()+string(os.PathSeparator), m.rootURI.Filename()+string(os.PathSeparator)) {
+		if !strings.HasPrefix(uri.Filename()+string(os.PathSeparator), m.rootURI.Filename()+string(os.PathSeparator)) {
 			continue
 		}
 		if len(m.modURI) > len(match) {
 			match = m.modURI
 		}
 	}
-	return s.GetFile(ctx, match)
+	return match, nil
 }
 
 func (s *snapshot) getPackage(id packageID, mode source.ParseMode) *packageHandle {
@@ -733,8 +730,11 @@ func (s *snapshot) FindFile(uri span.URI) source.VersionedFileHandle {
 	return s.files[f.URI()]
 }
 
-// GetFile returns a File for the given URI. It will always succeed because it
-// adds the file to the managed set if needed.
+// GetFile returns a File for the given URI. If the file is unknown it is added
+// to the managed set.
+//
+// GetFile succeeds even if the file does not exist. A non-nil error return
+// indicates some type of internal error, for example if ctx is cancelled.
 func (s *snapshot) GetFile(ctx context.Context, uri span.URI) (source.VersionedFileHandle, error) {
 	f, err := s.view.getFile(uri)
 	if err != nil {
@@ -1062,7 +1062,8 @@ func (s *snapshot) clone(ctx context.Context, withoutURIs map[span.URI]source.Ve
 			rootURI := span.URIFromPath(filepath.Dir(withoutURI.Filename()))
 			if currentMod {
 				if _, ok := result.modules[rootURI]; !ok {
-					result.addModule(ctx, currentFH.URI())
+					m := newModule(ctx, currentFH.URI())
+					result.modules[m.rootURI] = m
 					result.view.definitelyReinitialize()
 				}
 			} else if originalMod {
@@ -1426,6 +1427,25 @@ func (s *snapshot) getWorkspaceModuleHandle(ctx context.Context) (*workspaceModu
 		}
 		fhs = append(fhs, fh)
 	}
+	goplsModURI := span.URIFromPath(filepath.Join(s.view.Folder().Filename(), "gopls.mod"))
+	goplsModFH, err := s.GetFile(ctx, goplsModURI)
+	if err != nil {
+		return nil, err
+	}
+	_, err = goplsModFH.Read()
+	switch {
+	case err == nil:
+		// We have a gopls.mod. Our handle only depends on it.
+		fhs = []source.FileHandle{goplsModFH}
+	case os.IsNotExist(err):
+		// No gopls.mod, so we must build the workspace mod file automatically.
+		// Defensively ensure that the goplsModFH is nil as this controls automatic
+		// building of the workspace mod file.
+		goplsModFH = nil
+	default:
+		return nil, errors.Errorf("error getting gopls.mod: %w", err)
+	}
+
 	sort.Slice(fhs, func(i, j int) bool {
 		return fhs[i].URI() < fhs[j].URI()
 	})
@@ -1435,6 +1455,13 @@ func (s *snapshot) getWorkspaceModuleHandle(ctx context.Context) (*workspaceModu
 	}
 	key := workspaceModuleKey(hashContents([]byte(k)))
 	h := s.generation.Bind(key, func(ctx context.Context, arg memoize.Arg) interface{} {
+		if goplsModFH != nil {
+			parsed, err := s.ParseMod(ctx, goplsModFH)
+			if err != nil {
+				return &workspaceModuleData{err: err}
+			}
+			return &workspaceModuleData{file: parsed.File}
+		}
 		s := arg.(*snapshot)
 		data := &workspaceModuleData{}
 		data.file, data.err = s.BuildWorkspaceModFile(ctx)
@@ -1450,7 +1477,7 @@ func (s *snapshot) getWorkspaceModuleHandle(ctx context.Context) (*workspaceModu
 }
 
 // BuildWorkspaceModFile generates a workspace module given the modules in the
-// the workspace.
+// the workspace. It does not read gopls.mod.
 func (s *snapshot) BuildWorkspaceModFile(ctx context.Context) (*modfile.File, error) {
 	file := &modfile.File{}
 	file.AddModuleStmt("gopls-workspace")
@@ -1513,13 +1540,13 @@ func (s *snapshot) BuildWorkspaceModFile(ctx context.Context) (*modfile.File, er
 	return file, nil
 }
 
-func (s *snapshot) addModule(ctx context.Context, modURI span.URI) {
+func newModule(ctx context.Context, modURI span.URI) *moduleRoot {
 	rootURI := span.URIFromPath(filepath.Dir(modURI.Filename()))
 	sumURI := span.URIFromPath(sumFilename(modURI))
 	if info, _ := os.Stat(sumURI.Filename()); info == nil {
 		sumURI = ""
 	}
-	s.modules[rootURI] = &moduleRoot{
+	return &moduleRoot{
 		rootURI: rootURI,
 		modURI:  modURI,
 		sumURI:  sumURI,

@@ -23,6 +23,7 @@ import (
 	errors "golang.org/x/xerrors"
 )
 
+// metadata holds package metadata extracted from a call to packages.Load.
 type metadata struct {
 	id              packageID
 	pkgPath         packagePath
@@ -40,6 +41,8 @@ type metadata struct {
 	config *packages.Config
 }
 
+// load calls packages.Load for the given scopes, updating package metadata,
+// import graph, and mapped files with the result.
 func (s *snapshot) load(ctx context.Context, scopes ...interface{}) error {
 	var query []string
 	var containsDir bool // for logging
@@ -55,16 +58,6 @@ func (s *snapshot) load(ctx context.Context, scopes ...interface{}) error {
 			query = append(query, string(scope))
 		case fileURI:
 			query = append(query, fmt.Sprintf("file=%s", span.URI(scope).Filename()))
-		case directoryURI:
-			filename := span.URI(scope).Filename()
-			q := fmt.Sprintf("%s/...", filename)
-			// Simplify the query if it will be run in the requested directory.
-			// This ensures compatibility with Go 1.12 that doesn't allow
-			// <directory>/... in GOPATH mode.
-			if s.view.rootURI.Filename() == filename {
-				q = "./..."
-			}
-			query = append(query, q)
 		case moduleLoadScope:
 			query = append(query, fmt.Sprintf("%s/...", scope))
 		case viewLoadScope:
@@ -79,7 +72,7 @@ func (s *snapshot) load(ctx context.Context, scopes ...interface{}) error {
 			panic(fmt.Sprintf("unknown scope type %T", scope))
 		}
 		switch scope.(type) {
-		case directoryURI, viewLoadScope:
+		case viewLoadScope:
 			containsDir = true
 		}
 	}
@@ -234,6 +227,9 @@ func (s *snapshot) tempWorkspaceModule(ctx context.Context) (_ span.URI, cleanup
 	return span.URIFromPath(filepath.Dir(filename)), cleanup, nil
 }
 
+// setMetadata extracts metadata from pkg and records it in s. It
+// recurses through pkg.Imports to ensure that metadata exists for all
+// dependencies.
 func (s *snapshot) setMetadata(ctx context.Context, pkgPath packagePath, pkg *packages.Package, cfg *packages.Config, seen map[packageID]struct{}) (*metadata, error) {
 	id := packageID(pkg.ID)
 	if _, ok := seen[id]; ok {
@@ -262,6 +258,7 @@ func (s *snapshot) setMetadata(ctx context.Context, pkgPath packagePath, pkg *pa
 		s.addID(uri, m.id)
 	}
 
+	// TODO(rstambler): is this still necessary?
 	copied := map[packageID]struct{}{
 		id: {},
 	}

@@ -312,15 +312,8 @@ package main
 func main() {
 	fmt.Println(blah.Name)
 `
-	const want = `module mod.com
-
-go 1.12
-`
 	runner.Run(t, mod, func(t *testing.T, env *Env) {
-		env.Await(
-			InitialWorkspaceLoad,
-			env.DiagnosticAtRegexp("go.mod", "require"),
-		)
+		env.Await(env.DiagnosticAtRegexp("go.mod", "require"))
 		env.Sandbox.RunGoCommand(env.Ctx, "", "mod", []string{"tidy"})
 		env.Await(
 			EmptyDiagnostics("go.mod"),
@@ -436,7 +429,6 @@ func main() {
 	// Start from a bad state/bad IWL, and confirm that we recover.
 	t.Run("bad", func(t *testing.T) {
 		runner.Run(t, unknown, func(t *testing.T, env *Env) {
-			env.Await(InitialWorkspaceLoad)
 			env.OpenFile("go.mod")
 			env.Await(
 				env.DiagnosticAtRegexp("go.mod", "example.com v1.2.2"),

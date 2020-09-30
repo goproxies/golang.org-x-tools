@@ -179,6 +179,11 @@ type completer struct {
 	// items is the list of completion items returned.
 	items []CompletionItem
 
+	// completionCallbacks is a list of callbacks to collect completions that
+	// require expensive operations. This includes operations where we search
+	// through the entire module cache.
+	completionCallbacks []func(opts *imports.Options) error
+
 	// surrounding describes the identifier surrounding the position.
 	surrounding *Selection
 
@@ -516,6 +521,17 @@ func Completion(ctx context.Context, snapshot source.Snapshot, fh source.FileHan
 
 	// Deep search collected candidates and their members for more candidates.
 	c.deepSearch(ctx)
+	c.deepState.searchQueue = nil
+
+	for _, callback := range c.completionCallbacks {
+		if err := c.snapshot.RunProcessEnvFunc(ctx, callback); err != nil {
+			return nil, nil, err
+		}
+	}
+
+	// Search candidates populated by expensive operations like
+	// unimportedMembers etc. for more completion items.
+	c.deepSearch(ctx)
 
 	// Statement candidates offer an entire statement in certain contexts, as
 	// opposed to a single object. Add statement candidates last because they
@@ -559,7 +575,7 @@ func (c *completer) collectCompletions(ctx context.Context) error {
 	}
 
 	if lt := c.wantLabelCompletion(); lt != labelNone {
-		c.labels(ctx, lt)
+		c.labels(lt)
 		return nil
 	}
 
@@ -799,9 +815,10 @@ func (c *completer) populateImportCompletions(ctx context.Context, searchImport 
 		}
 	}
 
-	return c.snapshot.View().RunProcessEnvFunc(ctx, func(opts *imports.Options) error {
+	c.completionCallbacks = append(c.completionCallbacks, func(opts *imports.Options) error {
 		return imports.GetImportPaths(ctx, searchImports, prefix, c.filename, c.pkg.GetTypes().Name(), opts.Env)
 	})
+	return nil
 }
 
 // populateCommentCompletions yields completions for comments preceding or in declarations.
@@ -1048,7 +1065,7 @@ func (c *completer) selector(ctx context.Context, sel *ast.SelectorExpr) error {
 	// Is sel a qualified identifier?
 	if id, ok := sel.X.(*ast.Ident); ok {
 		if pkgName, ok := c.pkg.GetTypesInfo().Uses[id].(*types.PkgName); ok {
-			candidates := c.packageMembers(ctx, pkgName.Imported(), stdScore, nil)
+			candidates := c.packageMembers(pkgName.Imported(), stdScore, nil)
 			for _, cand := range candidates {
 				c.deepState.enqueue(cand)
 			}
@@ -1059,7 +1076,7 @@ func (c *completer) selector(ctx context.Context, sel *ast.SelectorExpr) error {
 	// Invariant: sel is a true selector.
 	tv, ok := c.pkg.GetTypesInfo().Types[sel.X]
 	if ok {
-		candidates := c.methodsAndFields(ctx, tv.Type, tv.Addressable(), nil)
+		candidates := c.methodsAndFields(tv.Type, tv.Addressable(), nil)
 		for _, cand := range candidates {
 			c.deepState.enqueue(cand)
 		}
@@ -1092,7 +1109,7 @@ func (c *completer) unimportedMembers(ctx context.Context, id *ast.Ident) error 
 
 	var relevances map[string]int
 	if len(paths) != 0 {
-		if err := c.snapshot.View().RunProcessEnvFunc(ctx, func(opts *imports.Options) error {
+		if err := c.snapshot.RunProcessEnvFunc(ctx, func(opts *imports.Options) error {
 			var err error
 			relevances, err = imports.ScoreImportPaths(ctx, opts.Env, paths)
 			return err
@@ -1116,7 +1133,7 @@ func (c *completer) unimportedMembers(ctx context.Context, id *ast.Ident) error 
 		if imports.ImportPathToAssumedName(path) != pkg.GetTypes().Name() {
 			imp.name = pkg.GetTypes().Name()
 		}
-		candidates := c.packageMembers(ctx, pkg.GetTypes(), unimportedScore(relevances[path]), imp)
+		candidates := c.packageMembers(pkg.GetTypes(), unimportedScore(relevances[path]), imp)
 		for _, cand := range candidates {
 			c.deepState.enqueue(cand)
 		}
@@ -1126,7 +1143,6 @@ func (c *completer) unimportedMembers(ctx context.Context, id *ast.Ident) error 
 	}
 
 	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
 
 	var mu sync.Mutex
 	add := func(pkgExport imports.PackageExport) {
@@ -1153,9 +1169,12 @@ func (c *completer) unimportedMembers(ctx context.Context, id *ast.Ident) error 
 			cancel()
 		}
 	}
-	return c.snapshot.View().RunProcessEnvFunc(ctx, func(opts *imports.Options) error {
+
+	c.completionCallbacks = append(c.completionCallbacks, func(opts *imports.Options) error {
+		defer cancel()
 		return imports.GetPackageExports(ctx, add, id.Name, c.filename, c.pkg.GetTypes().Name(), opts.Env)
 	})
+	return nil
 }
 
 // unimportedScore returns a score for an unimported package that is generally
@@ -1164,7 +1183,7 @@ func unimportedScore(relevance int) float64 {
 	return (stdScore + .1*float64(relevance)) / 2
 }
 
-func (c *completer) packageMembers(ctx context.Context, pkg *types.Package, score float64, imp *importInfo) []candidate {
+func (c *completer) packageMembers(pkg *types.Package, score float64, imp *importInfo) []candidate {
 	var candidates []candidate
 	scope := pkg.Scope()
 	for _, name := range scope.Names() {
@@ -1179,7 +1198,7 @@ func (c *completer) packageMembers(ctx context.Context, pkg *types.Package, scor
 	return candidates
 }
 
-func (c *completer) methodsAndFields(ctx context.Context, typ types.Type, addressable bool, imp *importInfo) []candidate {
+func (c *completer) methodsAndFields(typ types.Type, addressable bool, imp *importInfo) []candidate {
 	mset := c.methodSetCache[methodSetKey{typ, addressable}]
 	if mset == nil {
 		if addressable && !types.IsInterface(typ) && !isPointer(typ) {
@@ -1386,7 +1405,7 @@ func (c *completer) unimportedPackages(ctx context.Context, seen map[string]stru
 
 	var relevances map[string]int
 	if len(paths) != 0 {
-		if err := c.snapshot.View().RunProcessEnvFunc(ctx, func(opts *imports.Options) error {
+		if err := c.snapshot.RunProcessEnvFunc(ctx, func(opts *imports.Options) error {
 			var err error
 			relevances, err = imports.ScoreImportPaths(ctx, opts.Env, paths)
 			return err
@@ -1422,7 +1441,6 @@ func (c *completer) unimportedPackages(ctx context.Context, seen map[string]stru
 	}
 
 	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
 
 	var mu sync.Mutex
 	add := func(pkg imports.ImportFix) {
@@ -1454,9 +1472,11 @@ func (c *completer) unimportedPackages(ctx context.Context, seen map[string]stru
 		})
 		count++
 	}
-	return c.snapshot.View().RunProcessEnvFunc(ctx, func(opts *imports.Options) error {
+	c.completionCallbacks = append(c.completionCallbacks, func(opts *imports.Options) error {
+		defer cancel()
 		return imports.GetAllCandidates(ctx, add, prefix, c.filename, c.pkg.GetTypes().Name(), opts.Env)
 	})
+	return nil
 }
 
 // alreadyImports reports whether f has an import with the specified path.

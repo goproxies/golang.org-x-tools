@@ -121,10 +121,6 @@ type View struct {
 	// workspaceMode describes the way in which the view's workspace should be
 	// loaded.
 	workspaceMode workspaceMode
-
-	// True if the view is either in GOPATH, a module, or some other
-	// non go command build system.
-	hasValidBuildConfiguration bool
 }
 
 type workspaceInformation struct {
@@ -208,17 +204,6 @@ func (f *fileBase) addURI(uri span.URI) int {
 }
 
 func (v *View) ID() string { return v.id }
-
-func (s *snapshot) ValidBuildConfiguration() bool {
-	return s.view.hasValidBuildConfiguration
-}
-
-func (s *snapshot) ModFiles() []span.URI {
-	if s.view.modURI == "" {
-		return nil
-	}
-	return []span.URI{s.view.modURI}
-}
 
 // tempModFile creates a temporary go.mod file based on the contents of the
 // given go.mod file. It is the caller's responsibility to clean up the files
@@ -358,8 +343,26 @@ func (s *snapshot) WriteEnv(ctx context.Context, w io.Writer) error {
 			fullEnv[s[0]] = s[1]
 		}
 	}
-	fmt.Fprintf(w, "go env for %v\n(root %s)\n(valid build configuration = %v)\n(build flags: %v)\n",
-		s.view.folder.Filename(), s.view.rootURI.Filename(), s.view.hasValidBuildConfiguration, buildFlags)
+	goVersion, err := s.view.session.gocmdRunner.Run(ctx, gocommand.Invocation{
+		Verb:       "version",
+		BuildFlags: buildFlags,
+		Env:        env,
+		WorkingDir: s.view.rootURI.Filename(),
+	})
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(w, `go env for %v
+(root %s)
+(go version %s)
+(valid build configuration = %v)
+(build flags: %v)
+`,
+		s.view.folder.Filename(),
+		s.view.rootURI.Filename(),
+		goVersion.String(),
+		s.ValidBuildConfiguration(),
+		buildFlags)
 	for k, v := range fullEnv {
 		fmt.Fprintf(w, "%s=%s\n", k, v)
 	}

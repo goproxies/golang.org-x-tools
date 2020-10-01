@@ -185,20 +185,19 @@ func (s *Session) createView(ctx context.Context, name string, folder span.URI, 
 	backgroundCtx, cancel := context.WithCancel(baseCtx)
 
 	v := &View{
-		session:                    s,
-		initialized:                make(chan struct{}),
-		initializationSema:         make(chan struct{}, 1),
-		initializeOnce:             &sync.Once{},
-		id:                         strconv.FormatInt(index, 10),
-		options:                    options,
-		baseCtx:                    baseCtx,
-		backgroundCtx:              backgroundCtx,
-		cancel:                     cancel,
-		name:                       name,
-		folder:                     folder,
-		filesByURI:                 make(map[span.URI]*fileBase),
-		filesByBase:                make(map[string][]*fileBase),
-		hasValidBuildConfiguration: validBuildConfiguration,
+		session:            s,
+		initialized:        make(chan struct{}),
+		initializationSema: make(chan struct{}, 1),
+		initializeOnce:     &sync.Once{},
+		id:                 strconv.FormatInt(index, 10),
+		options:            options,
+		baseCtx:            baseCtx,
+		backgroundCtx:      backgroundCtx,
+		cancel:             cancel,
+		name:               name,
+		folder:             folder,
+		filesByURI:         make(map[span.URI]*fileBase),
+		filesByBase:        make(map[string][]*fileBase),
 		processEnv: &imports.ProcessEnv{
 			GocmdRunner: s.gocmdRunner,
 			WorkingDir:  folder.Filename(),
@@ -227,14 +226,7 @@ func (s *Session) createView(ctx context.Context, name string, folder span.URI, 
 		modules:           modules,
 	}
 
-	// TODO(rstambler): Change this function to work without a snapshot.
-	// Set the first snapshot's workspace directories. The view's modURI was
-	// set by setBuildInformation.
-	var fh source.FileHandle
-	if v.modURI != "" {
-		fh, _ = s.GetFile(ctx, v.modURI)
-	}
-	v.snapshot.workspaceDirectories = v.snapshot.findWorkspaceDirectories(ctx, fh)
+	v.snapshot.workspaceDirectories = v.snapshot.findWorkspaceDirectories(ctx)
 
 	// Initialize the view without blocking.
 	initCtx, initCancel := context.WithCancel(xcontext.Detach(ctx))

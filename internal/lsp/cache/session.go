@@ -251,6 +251,14 @@ func (s *Session) createView(ctx context.Context, name string, folder span.URI, 
 func findWorkspaceModules(ctx context.Context, root span.URI, options *source.Options) (map[span.URI]*moduleRoot, error) {
 	// Walk the view's folder to find all modules in the view.
 	modules := make(map[span.URI]*moduleRoot)
+	if !options.ExperimentalWorkspaceModule {
+		path := filepath.Join(root.Filename(), "go.mod")
+		if info, _ := os.Stat(path); info != nil {
+			m := newModule(ctx, span.URIFromPath(path))
+			modules[m.rootURI] = m
+		}
+		return modules, nil
+	}
 	return modules, filepath.Walk(root.Filename(), func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			// Probably a permission error. Keep looking.
@@ -271,11 +279,6 @@ func findWorkspaceModules(ctx context.Context, root span.URI, options *source.Op
 		if filepath.Base(path) == "go.mod" {
 			m := newModule(ctx, span.URIFromPath(path))
 			modules[m.rootURI] = m
-		}
-		// If we are not using experimental workspace modules, don't continue
-		// the search past the view's root.
-		if !options.ExperimentalWorkspaceModule {
-			return filepath.SkipDir
 		}
 		return nil
 	})
@@ -482,13 +485,6 @@ func (s *Session) DidModifyFiles(ctx context.Context, changes []source.FileModif
 				if _, err := fh.Read(); err != nil {
 					deletions[c.URI] = struct{}{}
 				}
-			}
-			// If the file change is to a go.mod file, and initialization for
-			// the view has previously failed, we should attempt to retry.
-			// TODO(rstambler): We can use unsaved contents with -modfile, so
-			// maybe we should do that and retry on any change?
-			if fh.Kind() == source.Mod && (c.OnDisk || c.Action == source.Save) {
-				view.maybeReinitialize()
 			}
 		}
 	}

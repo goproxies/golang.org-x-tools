@@ -273,6 +273,21 @@ func Hello() {
 			env.Await(
 				env.DiagnosticAtRegexp("main.go", `"mod.com/bob"`),
 			)
+			env.RunGoCommand("mod", "init", "mod.com")
+			env.Await(
+				EmptyDiagnostics("main.go"),
+				env.DiagnosticAtRegexp("bob/bob.go", "x"),
+			)
+		})
+	})
+
+	t.Run("without workspace module", func(t *testing.T) {
+		withOptions(EditorConfig{
+			WithoutExperimentalWorkspaceModule: true,
+		}).run(t, noMod, func(t *testing.T, env *Env) {
+			env.Await(
+				env.DiagnosticAtRegexp("main.go", `"mod.com/bob"`),
+			)
 			if err := env.Sandbox.RunGoCommand(env.Ctx, "", "mod", []string{"init", "mod.com"}); err != nil {
 				t.Fatal(err)
 			}

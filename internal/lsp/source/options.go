@@ -296,7 +296,23 @@ type ExperimentalOptions struct {
 	// SymbolMatcher sets the algorithm that is used when finding workspace symbols.
 	SymbolMatcher SymbolMatcher
 
-	// SymbolStyle specifies what style of symbols to return in symbol requests.
+	// SymbolStyle controls how symbols are qualified in symbol responses. It
+	// accepts the following values:
+	//  * "full": symbols are fully qualified, i.e. "path/to/pkg.Foo.Field"
+	//  * "package": symbols are package qualified, i.e. "pkg.Foo.Field"
+	//  * "dynamic": symbols are qualified using whichever qualifier results in
+	//     the highest scoring match for the given symbol query. Here a
+	//     "qualifier" is any "/" or "." delimited suffix of the fully qualified
+	//     symbol. i.e. "to/pkg.Foo.Field" or just "Foo.Field".
+	//
+	// Example Usage:
+	// ```json5
+	// "gopls": {
+	// ...
+	//   "symbolStyle": "dynamic",
+	// ...
+	// }
+	// ```
 	SymbolStyle SymbolStyle
 
 	// LinksInHover toggles the presence of links to documentation in hover.
@@ -330,6 +346,14 @@ type ExperimentalOptions struct {
 	// "&someStruct{}" are offered. Tests disable this flag to simplify
 	// their expected values.
 	LiteralCompletions bool
+
+	// ExperimentalDiagnosticsDelay controls the amount of time that gopls waits
+	// after the most recent file modification before computing deep diagnostics.
+	// Simple diagnostics (parsing and type-checking) are always run immediately
+	// on recently modified packages.
+	//
+	// This option must be set to a valid duration string, for example `"250ms"`.
+	ExperimentalDiagnosticsDelay time.Duration
 }
 
 // DebuggingOptions should not affect the logical execution of Gopls, but may
@@ -548,77 +572,43 @@ func (o *Options) set(name string, value interface{}) OptionResult {
 	case "completeUnimported":
 		result.setBool(&o.CompleteUnimported)
 	case "completionBudget":
-		if v, ok := result.asString(); ok {
-			d, err := time.ParseDuration(v)
-			if err != nil {
-				result.errorf("failed to parse duration %q: %v", v, err)
-				break
-			}
-			o.CompletionBudget = d
-		}
-
+		result.setDuration(&o.CompletionBudget)
 	case "matcher":
-		matcher, ok := result.asString()
-		if !ok {
-			break
-		}
-		switch strings.ToLower(matcher) {
-		case "fuzzy":
-			o.Matcher = Fuzzy
-		case "casesensitive":
-			o.Matcher = CaseSensitive
-		default:
-			o.Matcher = CaseInsensitive
+		if s, ok := result.asOneOf(
+			string(Fuzzy),
+			string(CaseSensitive),
+			string(CaseInsensitive),
+		); ok {
+			o.Matcher = Matcher(s)
 		}
 
 	case "symbolMatcher":
-		matcher, ok := result.asString()
-		if !ok {
-			break
-		}
-		switch strings.ToLower(matcher) {
-		case "fuzzy":
-			o.SymbolMatcher = SymbolFuzzy
-		case "casesensitive":
-			o.SymbolMatcher = SymbolCaseSensitive
-		default:
-			o.SymbolMatcher = SymbolCaseInsensitive
+		if s, ok := result.asOneOf(
+			string(SymbolFuzzy),
+			string(SymbolCaseInsensitive),
+			string(SymbolCaseSensitive),
+		); ok {
+			o.SymbolMatcher = SymbolMatcher(s)
 		}
 
 	case "symbolStyle":
-		style, ok := result.asString()
-		if !ok {
-			break
-		}
-		switch strings.ToLower(style) {
-		case "full":
-			o.SymbolStyle = FullyQualifiedSymbols
-		case "dynamic":
-			o.SymbolStyle = DynamicSymbols
-		case "package":
-			o.SymbolStyle = PackageQualifiedSymbols
-		default:
-			result.errorf("Unsupported symbol style %q", style)
+		if s, ok := result.asOneOf(
+			string(FullyQualifiedSymbols),
+			string(PackageQualifiedSymbols),
+			string(DynamicSymbols),
+		); ok {
+			o.SymbolStyle = SymbolStyle(s)
 		}
 
 	case "hoverKind":
-		hoverKind, ok := result.asString()
-		if !ok {
-			break
-		}
-		switch strings.ToLower(hoverKind) {
-		case "nodocumentation":
-			o.HoverKind = NoDocumentation
-		case "singleline":
-			o.HoverKind = SingleLine
-		case "synopsisdocumentation":
-			o.HoverKind = SynopsisDocumentation
-		case "fulldocumentation":
-			o.HoverKind = FullDocumentation
-		case "structured":
-			o.HoverKind = Structured
-		default:
-			result.errorf("Unsupported hover kind %q", hoverKind)
+		if s, ok := result.asOneOf(
+			string(NoDocumentation),
+			string(SingleLine),
+			string(SynopsisDocumentation),
+			string(FullDocumentation),
+			string(Structured),
+		); ok {
+			o.HoverKind = HoverKind(s)
 		}
 
 	case "linkTarget":
@@ -628,15 +618,8 @@ func (o *Options) set(name string, value interface{}) OptionResult {
 		result.setBool(&o.LinksInHover)
 
 	case "importShortcut":
-		var s string
-		result.setString(&s)
-		switch strings.ToLower(s) {
-		case "both":
-			o.ImportShortcut = Both
-		case "link":
-			o.ImportShortcut = Link
-		case "definition":
-			o.ImportShortcut = Definition
+		if s, ok := result.asOneOf(string(Both), string(Link), string(Definition)); ok {
+			o.ImportShortcut = ImportShortcut(s)
 		}
 
 	case "analyses":
@@ -692,6 +675,9 @@ func (o *Options) set(name string, value interface{}) OptionResult {
 
 	case "experimentalWorkspaceModule":
 		result.setBool(&o.ExperimentalWorkspaceModule)
+
+	case "experimentalDiagnosticsDelay":
+		result.setDuration(&o.ExperimentalDiagnosticsDelay)
 
 	// Replaced settings.
 	case "experimentalDisabledAnalyses":
@@ -760,6 +746,17 @@ func (r *OptionResult) setBool(b *bool) {
 	}
 }
 
+func (r *OptionResult) setDuration(d *time.Duration) {
+	if v, ok := r.asString(); ok {
+		parsed, err := time.ParseDuration(v)
+		if err != nil {
+			r.errorf("failed to parse duration %q: %v", v, err)
+			return
+		}
+		*d = parsed
+	}
+}
+
 func (r *OptionResult) setBoolMap(bm *map[string]bool) {
 	all, ok := r.Value.(map[string]interface{})
 	if !ok {
@@ -785,6 +782,21 @@ func (r *OptionResult) asString() (string, bool) {
 		return "", false
 	}
 	return b, true
+}
+
+func (r *OptionResult) asOneOf(options ...string) (string, bool) {
+	s, ok := r.asString()
+	if !ok {
+		return "", false
+	}
+	lower := strings.ToLower(s)
+	for _, opt := range options {
+		if strings.ToLower(opt) == lower {
+			return opt, true
+		}
+	}
+	r.errorf("Invalid option %q for enum %q", r.Value, r.Name)
+	return "", false
 }
 
 func (r *OptionResult) setString(s *string) {

@@ -282,9 +282,9 @@ func Hello() {
 	})
 
 	t.Run("without workspace module", func(t *testing.T) {
-		withOptions(EditorConfig{
-			WithoutExperimentalWorkspaceModule: true,
-		}).run(t, noMod, func(t *testing.T, env *Env) {
+		withOptions(
+			WithModes(WithoutExperiments),
+		).run(t, noMod, func(t *testing.T, env *Env) {
 			env.Await(
 				env.DiagnosticAtRegexp("main.go", `"mod.com/bob"`),
 			)
@@ -1355,6 +1355,30 @@ func _() {
 		env.OpenFile("a/a_ignore.go")
 		env.Await(
 			DiagnosticAt("a/a_ignore.go", 2, 8),
+		)
+	})
+}
+
+func TestEnableAllExperiments(t *testing.T) {
+	const mod = `
+-- go.mod --
+module mod.com
+
+-- main.go --
+package main
+
+func main() {
+	if true {}
+}`
+	withOptions(
+		EditorConfig{
+			AllExperiments: true,
+		},
+	).run(t, mod, func(t *testing.T, env *Env) {
+		// Confirm that staticcheck is enabled.
+		env.OpenFile("main.go")
+		env.Await(
+			env.DiagnosticAtRegexp("main.go", "if"),
 		)
 	})
 }

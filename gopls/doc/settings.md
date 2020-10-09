@@ -41,7 +41,11 @@ Must be one of:
  * `"FullDocumentation"`
  * `"NoDocumentation"`
  * `"SingleLine"`
- * `"Structured"`
+ * `"Structured"` is an experimental setting that returns a structured hover format.
+This format separates the signature from the documentation, so that the client
+can do more manipulation of these fields.\
+This should only be used by clients that support this behavior.
+
  * `"SynopsisDocumentation"`
 
 
@@ -185,14 +189,7 @@ Must be one of:
 
 Default: `"Fuzzy"`.
 ### **symbolStyle** *enum*
-symbolStyle controls how symbols are qualified in symbol responses. It
-accepts the following values:
- * "full": symbols are fully qualified, i.e. "path/to/pkg.Foo.Field"
- * "package": symbols are package qualified, i.e. "pkg.Foo.Field"
- * "dynamic": symbols are qualified using whichever qualifier results in
-    the highest scoring match for the given symbol query. Here a
-    "qualifier" is any "/" or "." delimited suffix of the fully qualified
-    symbol. i.e. "to/pkg.Foo.Field" or just "Foo.Field".
+symbolStyle controls how symbols are qualified in symbol responses.
 
 Example Usage:
 ```json5
@@ -204,9 +201,17 @@ Example Usage:
 ```
 Must be one of:
 
- * `"Dynamic"`
- * `"Full"`
- * `"Package"`
+ * `"Dynamic"` uses whichever qualifier results in the highest scoring
+match for the given symbol query. Here a "qualifier" is any "/" or "."
+delimited suffix of the fully qualified symbol. i.e. "to/pkg.Foo.Field" or
+just "Foo.Field".
+
+ * `"Full"` is fully qualified symbols, i.e.
+"path/to/pkg.Foo.Field".
+
+ * `"Package"` is package qualified symbols i.e.
+"pkg.Foo.Field".
+
 
 
 Default: `"Package"`.
@@ -273,6 +278,17 @@ This option must be set to a valid duration string, for example `"250ms"`.
 
 
 Default: `0`.
+### **experimentalPackageCacheKey** *bool*
+experimentalPackageCacheKey controls whether to use a coarser cache key
+for package type information to increase cache hits. This setting removes
+the user's environment, build flags, and working directory from the cache
+key, which should be a safe change as all relevant inputs into the type
+checking pass are already hashed into the key. This is temporarily guarded
+by an experiment because caching behavior is subtle and difficult to
+comprehensively test.
+
+
+Default: `false`.
 <!-- END Experimental: DO NOT MANUALLY EDIT THIS SECTION -->
 
 ## Debugging

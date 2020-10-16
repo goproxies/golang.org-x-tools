@@ -68,7 +68,7 @@ func DefaultOptions() *Options {
 	optionsOnce.Do(func() {
 		var commands []string
 		for _, c := range Commands {
-			commands = append(commands, c.Name)
+			commands = append(commands, c.ID())
 		}
 		defaultOptions = &Options{
 			ClientOptions: ClientOptions{
@@ -122,7 +122,9 @@ func DefaultOptions() *Options {
 				Matcher:                 Fuzzy,
 				SymbolMatcher:           SymbolFuzzy,
 				SymbolStyle:             PackageQualifiedSymbols,
-				LiteralCompletions:      true,
+			},
+			InternalOptions: InternalOptions{
+				LiteralCompletions: true,
 			},
 			Hooks: Hooks{
 				ComputeEdits:         myers.ComputeEdits,
@@ -146,6 +148,7 @@ type Options struct {
 	UserOptions
 	DebuggingOptions
 	ExperimentalOptions
+	InternalOptions
 	Hooks
 }
 
@@ -177,7 +180,7 @@ type UserOptions struct {
 	BuildFlags []string
 
 	// Env adds environment variables to external commands run by `gopls`, most notably `go list`.
-	Env []string
+	Env map[string]string
 
 	// HoverKind controls the information that appears in the hover text.
 	// SingleLine and Structured are intended for use only by authors of editor plugins.
@@ -201,6 +204,27 @@ type UserOptions struct {
 
 	// Gofumpt indicates if we should run gofumpt formatting.
 	Gofumpt bool
+}
+
+// EnvSlice returns Env as a slice of k=v strings.
+func (u *UserOptions) EnvSlice() []string {
+	var result []string
+	for k, v := range u.Env {
+		result = append(result, fmt.Sprintf("%v=%v", k, v))
+	}
+	return result
+}
+
+// SetEnvSlice sets Env from a slice of k=v strings.
+func (u *UserOptions) SetEnvSlice(env []string) {
+	u.Env = map[string]string{}
+	for _, kv := range env {
+		split := strings.SplitN(kv, "=", 2)
+		if len(split) != 2 {
+			continue
+		}
+		u.Env[split[0]] = split[1]
+	}
 }
 
 // Hooks contains configuration that is provided to the Gopls command by the
@@ -335,11 +359,6 @@ type ExperimentalOptions struct {
 	// for multi-module workspaces.
 	ExperimentalWorkspaceModule bool
 
-	// LiteralCompletions controls whether literal candidates such as
-	// "&someStruct{}" are offered. Tests disable this flag to simplify
-	// their expected values.
-	LiteralCompletions bool
-
 	// ExperimentalDiagnosticsDelay controls the amount of time that gopls waits
 	// after the most recent file modification before computing deep diagnostics.
 	// Simple diagnostics (parsing and type-checking) are always run immediately
@@ -370,6 +389,15 @@ type DebuggingOptions struct {
 	// dynamically reduce the search scope to ensure we return timely
 	// results. Zero means unlimited.
 	CompletionBudget time.Duration
+}
+
+// InternalOptions contains settings that are not exposed to the user for various
+// reasons, e.g. settings used by tests.
+type InternalOptions struct {
+	// LiteralCompletions controls whether literal candidates such as
+	// "&someStruct{}" are offered. Tests disable this flag to simplify
+	// their expected values.
+	LiteralCompletions bool
 }
 
 type ImportShortcut string
@@ -507,6 +535,7 @@ func (o *Options) Clone() *Options {
 		ClientOptions:       o.ClientOptions,
 		DebuggingOptions:    o.DebuggingOptions,
 		ExperimentalOptions: o.ExperimentalOptions,
+		InternalOptions:     o.InternalOptions,
 		Hooks: Hooks{
 			GoDiff:        o.Hooks.GoDiff,
 			ComputeEdits:  o.Hooks.ComputeEdits,
@@ -534,7 +563,7 @@ func (o *Options) Clone() *Options {
 		copy(dst, src)
 		return dst
 	}
-	result.Env = copySlice(o.Env)
+	result.SetEnvSlice(o.EnvSlice())
 	result.BuildFlags = copySlice(o.BuildFlags)
 
 	copyAnalyzerMap := func(src map[string]Analyzer) map[string]Analyzer {
@@ -574,17 +603,17 @@ func (o *Options) set(name string, value interface{}) OptionResult {
 	case "env":
 		menv, ok := value.(map[string]interface{})
 		if !ok {
-			result.errorf("invalid config gopls.env type %T", value)
+			result.errorf("invalid type %T, expect map", value)
 			break
 		}
 		for k, v := range menv {
-			o.Env = append(o.Env, fmt.Sprintf("%s=%s", k, v))
+			o.Env[k] = fmt.Sprint(v)
 		}
 
 	case "buildFlags":
 		iflags, ok := value.([]interface{})
 		if !ok {
-			result.errorf("invalid config gopls.buildFlags type %T", value)
+			result.errorf("invalid type %T, expect list", value)
 			break
 		}
 		flags := make([]string, 0, len(iflags))
@@ -697,7 +726,7 @@ func (o *Options) set(name string, value interface{}) OptionResult {
 	case "gofumpt":
 		result.setBool(&o.Gofumpt)
 
-	case "semantictokens":
+	case "semanticTokens":
 		result.setBool(&o.SemanticTokens)
 
 	case "expandWorkspaceToModule":
@@ -708,6 +737,9 @@ func (o *Options) set(name string, value interface{}) OptionResult {
 
 	case "experimentalDiagnosticsDelay":
 		result.setDuration(&o.ExperimentalDiagnosticsDelay)
+
+	case "experimentalPackageCacheKey":
+		result.setBool(&o.ExperimentalPackageCacheKey)
 
 	case "allExperiments":
 		// This setting should be handled before all of the other options are
@@ -762,13 +794,14 @@ func (o *Options) set(name string, value interface{}) OptionResult {
 }
 
 func (r *OptionResult) errorf(msg string, values ...interface{}) {
-	r.Error = errors.Errorf(msg, values...)
+	prefix := fmt.Sprintf("parsing setting %q: ", r.Name)
+	r.Error = errors.Errorf(prefix+msg, values...)
 }
 
 func (r *OptionResult) asBool() (bool, bool) {
 	b, ok := r.Value.(bool)
 	if !ok {
-		r.errorf("Invalid type %T for bool option %q", r.Value, r.Name)
+		r.errorf("invalid type %T, expect bool", r.Value)
 		return false, false
 	}
 	return b, true
@@ -794,7 +827,7 @@ func (r *OptionResult) setDuration(d *time.Duration) {
 func (r *OptionResult) setBoolMap(bm *map[string]bool) {
 	all, ok := r.Value.(map[string]interface{})
 	if !ok {
-		r.errorf("Invalid type %T for map[string]interface{} option %q", r.Value, r.Name)
+		r.errorf("invalid type %T for map[string]bool option", r.Value)
 		return
 	}
 	m := make(map[string]bool)
@@ -802,7 +835,7 @@ func (r *OptionResult) setBoolMap(bm *map[string]bool) {
 		if enabled, ok := enabled.(bool); ok {
 			m[a] = enabled
 		} else {
-			r.errorf("Invalid type %d for map key %q in option %q", a, r.Name)
+			r.errorf("invalid type %T for map key %q", enabled, a)
 			return
 		}
 	}
@@ -812,7 +845,7 @@ func (r *OptionResult) setBoolMap(bm *map[string]bool) {
 func (r *OptionResult) asString() (string, bool) {
 	b, ok := r.Value.(string)
 	if !ok {
-		r.errorf("Invalid type %T for string option %q", r.Value, r.Name)
+		r.errorf("invalid type %T, expect string", r.Value)
 		return "", false
 	}
 	return b, true
@@ -829,7 +862,7 @@ func (r *OptionResult) asOneOf(options ...string) (string, bool) {
 			return opt, true
 		}
 	}
-	r.errorf("Invalid option %q for enum %q", r.Value, r.Name)
+	r.errorf("invalid option %q for enum", r.Value)
 	return "", false
 }
 

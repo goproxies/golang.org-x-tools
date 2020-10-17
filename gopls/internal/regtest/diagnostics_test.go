@@ -1004,7 +1004,7 @@ go 1.12
 		env.WriteWorkspaceFile(name, "")
 		env.Await(CompletedWork(lsp.DiagnosticWorkTitle(lsp.FromDidChangeWatchedFiles), 1))
 
-		env.OpenFileWithContent(name, "\n")
+		env.CreateBuffer(name, "\n")
 		env.Await(CompletedWork(lsp.DiagnosticWorkTitle(lsp.FromDidOpen), 1))
 
 		env.EditBuffer(name, fake.NewEdit(1, 0, 1, 0, content))
@@ -1142,7 +1142,7 @@ package main
 func main() {}
 `
 	runner.Run(t, basic, func(t *testing.T, env *Env) {
-		env.Editor.OpenFileWithContent(env.Ctx, "foo.go", `package main`)
+		env.Editor.CreateBuffer(env.Ctx, "foo.go", `package main`)
 		env.Await(
 			CompletedWork(lsp.DiagnosticWorkTitle(lsp.FromDidOpen), 1),
 		)
@@ -1367,19 +1367,19 @@ module mod.com
 -- main.go --
 package main
 
-func main() {
-	if true {}
-}`
+import "bytes"
+
+func b(c bytes.Buffer) {
+	_ = 1
+}
+`
 	withOptions(
 		EditorConfig{
 			AllExperiments: true,
 		},
 	).run(t, mod, func(t *testing.T, env *Env) {
-		// Confirm that staticcheck is enabled.
-		env.OpenFile("main.go")
-		env.Await(
-			env.DiagnosticAtRegexp("main.go", "if"),
-		)
+		// Confirm that the setting doesn't cause any warnings.
+		env.Await(NoShowMessage())
 	})
 }
 
@@ -1424,6 +1424,31 @@ func main() {
 				InitialWorkspaceLoad,
 				NoDiagnosticWithMessage("illegal character U+0023 '#'"),
 			),
+		)
+	})
+}
+
+// When foo_test.go is opened, gopls will object to the borked package name.
+// This test asserts that when the package name is fixed, gopls will soon after
+// have no more complaints about it.
+// https://github.com/golang/go/issues/41061
+func TestRenamePackage(t *testing.T) {
+	t.Skip("Waiting for the fix that makes this pass: https://github.com/golang/go/issues/41061")
+
+	const contents = `
+-- go.mod --
+module mod.com
+-- foo.go --
+package foo
+-- foo_test.go --
+package foo_`
+
+	runner.Run(t, contents, func(t *testing.T, env *Env) {
+		env.OpenFile("foo_test.go")
+		env.RegexpReplace("foo_test.go", "foo_", "foo_test")
+		env.SaveBuffer("foo_test.go")
+		env.Await(
+			EmptyDiagnostics("foo_test.go"),
 		)
 	})
 }
